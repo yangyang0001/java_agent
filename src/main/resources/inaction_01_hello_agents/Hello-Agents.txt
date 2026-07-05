@@ -50,11 +50,13 @@
 9、AI 的衡量维度和处理组件
     PEAS: 参考图片 004_任何智能体的PEAS模型.png; 这里以智能旅行助手为例列出!
 
+10、 智能体是如何和环境 之间如何工作的?
+    参考 005_智能体和环境之间如何工作.png
 
+11、动手实验: 使用 Python 实现一个 Thought ---> Action ---> Observation 交互范式的 智能旅行助手
 
-
-
-
+    首先安装 Python 使用  pip --verison 可以看一下 当前环境 Python 的版本! 执行指令
+    pip install requests tavily-python openai
 
 
 
