@@ -59,7 +59,7 @@
     pip install requests tavily-python openai
 
 
-
+12、了解 WorkFlow 和 Agent 的区别 参考
 
 
 
