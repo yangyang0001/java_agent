@@ -1,4 +1,4 @@
-package deepblue.inaction_01_hello_agents.chater_01;
+package deepblue.inaction_01_hello_agents.chapter_01;
 
 /**
  * 模拟多个参数的方式进行
