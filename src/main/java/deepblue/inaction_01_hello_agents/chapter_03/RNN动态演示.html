@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>循环神经网络（RNN）动态演示</title>
+<style>
+  :root {
+    --bg:#faf9f6; --surface:#ffffff; --surface-2:#f1efe9;
+    --text:#1b1e22; --text-2:#5b5c57; --text-3:#8b8a83;
+    --border:rgba(27,30,34,0.12);
+    --accent-a:#2a78d6; --accent-b:#eb6834; --accent-c:#8b5cf6;
+    --good:#0ca30c; --bad:#d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#14161a; --surface:#1c1f24; --surface-2:#22252b;
+      --text:#eceae4; --text-2:#a7a9a0; --text-3:#797b76;
+      --border:rgba(236,234,228,0.14);
+      --accent-a:#5b9bef; --accent-b:#f0985e; --accent-c:#a78bfa;
+      --good:#3fbd7c; --bad:#e0645a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; justify-content: center; padding: 32px 16px;
+  }
+  .panel {
+    width: 100%; max-width: 720px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 16px; padding: 24px;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  h1 { margin: 0; font-size: 20px; }
+  .stage { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+  canvas { max-width: 100%; height: auto; background: var(--surface-2); border-radius: 10px; }
+  .readout { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 12px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12.5px; color: var(--text-2); }
+  .legend .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
+  .dot-cell { background: var(--accent-a); } .dot-h { background: var(--accent-c); } .dot-x { background: var(--accent-b); }
+  .row { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  .row-label { font-size: 13px; color: var(--text-2); }
+  .row-value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .bars { display: flex; flex-direction: column; gap: 8px; }
+  .bar-row { display: flex; align-items: center; gap: 8px; }
+  .bar-label { width: 34px; font-size: 12px; color: var(--text-2); font-family: ui-monospace, monospace; flex-shrink: 0; }
+  .bar-track { position: relative; flex: 1; height: 14px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+  .bar-fill { position: absolute; top: 0; bottom: 0; background: var(--accent-c); border-radius: 4px; transition: none; }
+  .bar-mid { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--border); }
+  .bar-num { width: 52px; text-align: right; font-size: 12px; font-family: ui-monospace, monospace; color: var(--text-2); flex-shrink: 0; }
+  .formula { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
+    background: var(--surface-2); border-radius: 8px; padding: 10px 12px; line-height: 1.7;
+    white-space: pre-wrap; color: var(--text-2); }
+  .caption { font-size: 13px; color: var(--text-3); margin: 0; }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <h1>RNN：隐藏状态随时间步更新演示</h1>
+    <div class="stage">
+      <canvas id="c" width="420" height="220" aria-label="RNN 展开结构动态演示，展示输入、隐藏状态更新与输出"></canvas>
+      <div class="readout">
+        <div class="legend">
+          <span><span class="dot dot-x"></span>输入 xₜ</span>
+          <span><span class="dot dot-cell"></span>Cell（参数共享）</span>
+          <span><span class="dot dot-h"></span>隐藏状态 h</span>
+        </div>
+        <div class="row"><span class="row-label">当前时间步 t</span><span class="row-value" id="stepVal">1</span></div>
+        <div class="row"><span class="row-label">输入 xₜ</span><span class="row-value" id="xVal">0.00</span></div>
+        <div class="row"><span class="row-label">输出 yₜ</span><span class="row-value" id="yVal">0.00</span></div>
+        <div>
+          <div class="row-label" style="margin-bottom:6px;">隐藏状态 hₜ（每个分量取值范围 [-1, 1]）</div>
+          <div class="bars">
+            <div class="bar-row">
+              <span class="bar-label">h[0]</span>
+              <div class="bar-track"><div class="bar-mid"></div><div class="bar-fill" id="barH0"></div></div>
+              <span class="bar-num" id="numH0">0.00</span>
+            </div>
+            <div class="bar-row">
+              <span class="bar-label">h[1]</span>
+              <div class="bar-track"><div class="bar-mid"></div><div class="bar-fill" id="barH1"></div></div>
+              <span class="bar-num" id="numH1">0.00</span>
+            </div>
+          </div>
+        </div>
+        <div class="formula" id="formulaBox"></div>
+      </div>
+    </div>
+    <p class="caption">
+      每个时间步：新的隐藏状态 h_t = tanh(W_xh·x_t + W_hh·h_(t-1) + b_h) 由「当前输入」和
+      「上一步记忆」共同决定，再由 h_t 算出输出 y_t = W_hy·h_t + b_y。高亮的方框沿时间轴
+      循环推进，右侧的两根柱状条就是隐藏状态两个分量的实时数值——可以看到旧记忆是如何被
+      逐步更新、混合、覆盖的。
+    </p>
+  </div>
+<script>
+(function () {
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  var stepValEl = document.getElementById('stepVal');
+  var xValEl = document.getElementById('xVal');
+  var yValEl = document.getElementById('yVal');
+  var barH0 = document.getElementById('barH0'), numH0 = document.getElementById('numH0');
+  var barH1 = document.getElementById('barH1'), numH1 = document.getElementById('numH1');
+  var formulaBox = document.getElementById('formulaBox');
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---- 极小的 RNN 参数（1 维输入，2 维隐藏状态，1 维输出）----
+  var Wxh = [0.6, -0.4];
+  var Whh = [[0.5, -0.3], [0.2, 0.4]];
+  var bh  = [0.1, -0.1];
+  var Why = [0.7, -0.6];
+  var by  = 0.05;
+
+  var inputs = [0.9, -0.6, 0.4, 0.8, -0.9, 0.2, -0.3, 0.7];
+  var STEP_MS = reduceMotion ? 1 : 1600;
+
+  function tanh(x) { return Math.tanh(x); }
+
+  // 依据「进行到第几步（可含小数，表示正在计算中）」重算 h 序列
+  function computeUpTo(stepFloat) {
+    var fullSteps = Math.floor(stepFloat);
+    var frac = stepFloat - fullSteps;
+    var h = [0, 0];
+    var x = 0, y = 0;
+    var hPrev = [0, 0], raw0 = 0, raw1 = 0, h0Full = 0, h1Full = 0;
+    for (var t = 0; t <= fullSteps && t < inputs.length; t++) {
+      x = inputs[t];
+      var r0 = Wxh[0] * x + Whh[0][0] * h[0] + Whh[0][1] * h[1] + bh[0];
+      var r1 = Wxh[1] * x + Whh[1][0] * h[0] + Whh[1][1] * h[1] + bh[1];
+      var h0Next = tanh(r0), h1Next = tanh(r1);
+      if (t === fullSteps) {
+        // 记录「本步」用到的 h(t-1) 和代入公式后的原始值，供公式面板展示
+        hPrev = [h[0], h[1]];
+        raw0 = r0; raw1 = r1; h0Full = h0Next; h1Full = h1Next;
+      }
+      if (t === fullSteps && frac > 0) {
+        // 正在从 h(t-1) 向 h(t) 过渡：做插值展示「更新中」的过程
+        h = [h[0] + (h0Next - h[0]) * frac, h[1] + (h1Next - h[1]) * frac];
+      } else {
+        h = [h0Next, h1Next];
+      }
+    }
+    y = Why[0] * h[0] + Why[1] * h[1] + by;
+    return {
+      x: x, h: h, y: y, stepIndex: fullSteps % inputs.length,
+      hPrev: hPrev, raw0: raw0, raw1: raw1, h0Full: h0Full, h1Full: h1Full
+    };
+  }
+
+  function fmt2(n) { return n.toFixed(2); }
+
+  function buildFormulaText(state) {
+    return (
+      'h[0] = tanh(0.60×' + fmt2(state.x) + ' + 0.50×' + fmt2(state.hPrev[0]) +
+      ' + (-0.30)×' + fmt2(state.hPrev[1]) + ' + 0.10)\n' +
+      '     = tanh(' + state.raw0.toFixed(3) + ') ≈ ' + state.h0Full.toFixed(3) + '\n\n' +
+      'h[1] = tanh(-0.40×' + fmt2(state.x) + ' + 0.20×' + fmt2(state.hPrev[0]) +
+      ' + 0.40×' + fmt2(state.hPrev[1]) + ' + (-0.10))\n' +
+      '     = tanh(' + state.raw1.toFixed(3) + ') ≈ ' + state.h1Full.toFixed(3)
+    );
+  }
+
+  function drawArrow(x0, y0, x1, y1, color, width) {
+    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = width;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    var angle = Math.atan2(y1 - y0, x1 - x0), headLen = 7;
+    ctx.beginPath(); ctx.moveTo(x1, y1);
+    ctx.lineTo(x1 - headLen * Math.cos(angle - Math.PI / 6), y1 - headLen * Math.sin(angle - Math.PI / 6));
+    ctx.lineTo(x1 - headLen * Math.cos(angle + Math.PI / 6), y1 - headLen * Math.sin(angle + Math.PI / 6));
+    ctx.closePath(); ctx.fill();
+  }
+
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  var N_CELLS = 4;
+  var cellW = 70, cellH = 56, gap = 32, startX = 55, cellY = 90;
+
+  function render(t) {
+    var w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    var borderColor = cssVar('--border') || '#ddd';
+    var textColor = cssVar('--text') || '#222';
+    var text3 = cssVar('--text-3') || '#888';
+    var colorCell = cssVar('--accent-a') || '#2a78d6';
+    var colorH = cssVar('--accent-c') || '#8b5cf6';
+    var colorX = cssVar('--accent-b') || '#eb6834';
+
+    var time = reduceMotion ? 0 : t;
+    var stepFloat = (time / STEP_MS) % inputs.length;
+    var activeLocal = stepFloat % N_CELLS; // 高亮在 N_CELLS 个格子间循环显示
+
+    ctx.font = '11px system-ui, sans-serif';
+
+    for (var i = 0; i < N_CELLS; i++) {
+      var cx = startX + i * (cellW + gap);
+      var isActive = Math.floor(activeLocal) === i;
+      var localFrac = isActive ? (activeLocal - i) : 0;
+
+      // cell box
+      ctx.lineWidth = isActive ? 3 : 2;
+      ctx.strokeStyle = isActive ? colorCell : borderColor;
+      ctx.fillStyle = isActive ? (colorCell + '22') : 'transparent';
+      roundRect(ctx, cx, cellY, cellW, cellH, 8);
+      ctx.fill(); ctx.stroke();
+
+      ctx.fillStyle = isActive ? colorCell : text3;
+      ctx.textAlign = 'center';
+      ctx.fillText('Cell', cx + cellW / 2, cellY + cellH / 2 + 4);
+
+      // input arrow (x -> cell)
+      ctx.strokeStyle = colorX; ctx.fillStyle = colorX;
+      drawArrow(cx + cellW / 2, cellY + cellH + 34, cx + cellW / 2, cellY + cellH + 4, colorX, 2);
+      ctx.fillText('x', cx + cellW / 2, cellY + cellH + 48);
+
+      // output arrow (cell -> y)
+      drawArrow(cx + cellW / 2, cellY - 4, cx + cellW / 2, cellY - 30, colorCell, 2);
+      ctx.fillStyle = colorCell;
+      ctx.fillText('y', cx + cellW / 2, cellY - 36);
+
+      // hidden state arrow to next cell
+      if (i < N_CELLS - 1) {
+        var hx0 = cx + cellW, hx1 = cx + cellW + gap;
+        var hy = cellY + cellH / 2;
+        var flowing = isActive && localFrac > 0.15;
+        drawArrow(hx0, hy, hx1, hy, flowing ? colorH : borderColor, flowing ? 3 : 1.6);
+        if (flowing) {
+          var pulseX = hx0 + (hx1 - hx0) * Math.min(1, (localFrac - 0.15) / 0.7);
+          ctx.beginPath(); ctx.arc(pulseX, hy, 4, 0, Math.PI * 2);
+          ctx.fillStyle = colorH; ctx.fill();
+        }
+        ctx.fillStyle = text3;
+        ctx.font = '10px ui-monospace, monospace';
+        ctx.fillText('h', (hx0 + hx1) / 2, hy - 8);
+        ctx.font = '11px system-ui, sans-serif';
+      }
+    }
+
+    // 省略号，暗示序列继续
+    ctx.fillStyle = text3;
+    ctx.font = '16px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('…', startX + N_CELLS * (cellW + gap) - gap + 8, cellY + cellH / 2 + 5);
+
+    // ---- 更新右侧数值面板 ----
+    var state = computeUpTo(stepFloat);
+    stepValEl.textContent = (state.stepIndex + 1) + ' / ' + inputs.length;
+    xValEl.textContent = state.x.toFixed(2);
+    yValEl.textContent = state.y.toFixed(2);
+
+    setBar(barH0, numH0, state.h[0]);
+    setBar(barH1, numH1, state.h[1]);
+    formulaBox.textContent = buildFormulaText(state);
+
+    if (!reduceMotion) requestAnimationFrame(render);
+  }
+
+  function setBar(fillEl, numEl, value) {
+    var clamped = Math.max(-1, Math.min(1, value));
+    var pct = (clamped + 1) / 2 * 100;
+    if (clamped >= 0) {
+      fillEl.style.left = '50%';
+      fillEl.style.width = (pct - 50) + '%';
+    } else {
+      fillEl.style.left = pct + '%';
+      fillEl.style.width = (50 - pct) + '%';
+    }
+    numEl.textContent = value.toFixed(2);
+  }
+
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  requestAnimationFrame(render);
+})();
+</script>
+</body>
+</html>

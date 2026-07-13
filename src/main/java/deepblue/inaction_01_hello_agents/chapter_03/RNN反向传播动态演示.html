@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>RNN 反向传播（BPTT）梯度消失/爆炸 动态演示</title>
+<style>
+  :root {
+    --bg:#faf9f6; --surface:#ffffff; --surface-2:#f1efe9;
+    --text:#1b1e22; --text-2:#5b5c57; --text-3:#8b8a83;
+    --border:rgba(27,30,34,0.12);
+    --accent-a:#2a78d6; --accent-b:#eb6834; --accent-c:#8b5cf6;
+    --good:#0ca30c; --bad:#d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#14161a; --surface:#1c1f24; --surface-2:#22252b;
+      --text:#eceae4; --text-2:#a7a9a0; --text-3:#797b76;
+      --border:rgba(236,234,228,0.14);
+      --accent-a:#5b9bef; --accent-b:#f0985e; --accent-c:#a78bfa;
+      --good:#3fbd7c; --bad:#e0645a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; justify-content: center; padding: 32px 16px;
+  }
+  .panel {
+    width: 100%; max-width: 760px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 16px; padding: 24px;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  h1 { margin: 0; font-size: 20px; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+    cursor: pointer;
+  }
+  button.active { background: var(--accent-a); border-color: var(--accent-a); color: #fff; }
+  canvas { max-width: 100%; height: auto; background: var(--surface-2); border-radius: 10px; }
+  .readout { display: flex; flex-wrap: wrap; gap: 18px; }
+  .row { display: flex; flex-direction: column; gap: 2px; min-width: 140px; }
+  .row-label { font-size: 12.5px; color: var(--text-2); }
+  .row-value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .row-value.warn { color: var(--bad); }
+  .row-value.ok { color: var(--good); }
+  .formula { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
+    background: var(--surface-2); border-radius: 8px; padding: 10px 12px; line-height: 1.7;
+    white-space: pre-wrap; color: var(--text-2); }
+  .caption { font-size: 13px; color: var(--text-3); margin: 0; }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <h1>BPTT 推导演示：梯度沿时间反向传播时的连乘</h1>
+    <div class="toolbar">
+      <button id="btnVanish" class="active">梯度消失（w_hh = 0.5）</button>
+      <button id="btnExplode">梯度爆炸（w_hh = 2.0）</button>
+    </div>
+    <canvas id="c" width="680" height="180" aria-label="梯度沿时间步反向传播时逐步连乘 tanh 导数与 w_hh 的动态演示"></canvas>
+    <div class="readout">
+      <div class="row"><span class="row-label">回退步数 (T − k)</span><span class="row-value" id="hopVal">0</span></div>
+      <div class="row"><span class="row-label">单步缩放因子</span><span class="row-value" id="factorVal">0.45</span></div>
+      <div class="row"><span class="row-label">累计梯度 ∂h_T/∂h_k</span><span class="row-value" id="cumVal">1.000</span></div>
+    </div>
+    <div class="formula" id="formulaBox"></div>
+    <p class="caption">
+      橙色小球从最右侧的 h_T（损失产生的地方）出发向左回传，每跨越一个时间步就要乘一次
+      tanh'(z_t)·w_hh：消失模式下这个乘积 &lt; 1，小球和数值都随之持续缩小，跨过约 10 步后
+      已经几乎可以忽略——这就是「记不住」很久以前信息的原因；切到爆炸模式，同样的连乘
+      则会指数级增大，图中 10 步内数值已经涨到 357 倍，序列再长几步（20~30 步）就会涨到
+      千万倍以上，远超浮点数能正常参与计算的范围，实际训练中会直接变成 NaN。
+    </p>
+  </div>
+<script>
+(function () {
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  var hopValEl = document.getElementById('hopVal');
+  var factorValEl = document.getElementById('factorVal');
+  var cumValEl = document.getElementById('cumVal');
+  var formulaBox = document.getElementById('formulaBox');
+  var btnVanish = document.getElementById('btnVanish');
+  var btnExplode = document.getElementById('btnExplode');
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var TANH_AVG = 0.9; // tanh'(z) 的近似代表值，取值范围本身就 <= 1
+  var mode = 'vanish'; // 'vanish' | 'explode'
+  var N_HOPS = 10; // 演示回退 10 步
+  var STEP_MS = reduceMotion ? 1 : 900;
+
+  function whh() { return mode === 'vanish' ? 0.5 : 2.0; }
+  function stepFactor() { return whh() * TANH_AVG; }
+
+  btnVanish.addEventListener('click', function () {
+    mode = 'vanish'; btnVanish.classList.add('active'); btnExplode.classList.remove('active');
+  });
+  btnExplode.addEventListener('click', function () {
+    mode = 'explode'; btnExplode.classList.add('active'); btnVanish.classList.remove('active');
+  });
+
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  var nodeCount = N_HOPS + 1; // k = 0..N_HOPS，其中最右侧 k = N_HOPS 是 h_T
+  var marginX = 40, marginY = 90;
+
+  function nodeX(i) {
+    var usable = canvas.width - marginX * 2;
+    return marginX + usable * i / (nodeCount - 1);
+  }
+
+  function render(t) {
+    var w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    var borderColor = cssVar('--border') || '#ddd';
+    var text2 = cssVar('--text-2') || '#666';
+    var text3 = cssVar('--text-3') || '#999';
+    var colorH = cssVar('--accent-c') || '#8b5cf6';
+    var colorPulse = cssVar('--accent-b') || '#eb6834';
+    var bad = cssVar('--bad') || '#d03b3b';
+
+    var time = reduceMotion ? 0 : t;
+    var cycleLen = (N_HOPS + 2) * STEP_MS; // 多留一点尾部停顿再循环
+    var cyclePos = time % cycleLen;
+    var hopFloat = Math.min(N_HOPS, cyclePos / STEP_MS);
+    var hopFull = Math.floor(hopFloat);
+    var hopFrac = hopFloat - hopFull;
+
+    // 主时间轴
+    ctx.strokeStyle = borderColor; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(marginX, marginY); ctx.lineTo(w - marginX, marginY); ctx.stroke();
+
+    // 节点与因子标签（从右到左：k = N_HOPS 是 T，k = N_HOPS - i 依次往左）
+    var factor = stepFactor();
+    var overflow = false;
+    for (var i = 0; i < nodeCount; i++) {
+      var x = nodeX(nodeCount - 1 - i); // i=0 对应最右（T），i 增大往左走
+      var hopsBack = i;
+      var reached = hopFull > hopsBack || (hopFull === hopsBack); // 是否已经被小球经过
+      var cum = Math.pow(factor, hopsBack);
+      if (mode === 'explode' && cum > 1e6) { overflow = true; }
+
+      ctx.beginPath();
+      ctx.arc(x, marginY, 5, 0, Math.PI * 2);
+      ctx.fillStyle = reached ? colorH : (borderColor);
+      ctx.fill();
+
+      ctx.font = '11px ui-monospace, monospace';
+      ctx.fillStyle = text3;
+      ctx.textAlign = 'center';
+      var label = hopsBack === 0 ? 'h_T' : ('h_(T-' + hopsBack + ')');
+      ctx.fillText(label, x, marginY + 22);
+
+      if (reached) {
+        var shown = overflow && hopsBack > 0 && (Math.pow(factor, hopsBack) > 1e6)
+          ? 'NaN' : cum.toPrecision(cum < 0.01 ? 2 : 3);
+        ctx.fillStyle = (mode === 'explode' && overflow) ? bad : text2;
+        ctx.fillText(shown, x, marginY - 14);
+      }
+    }
+
+    // 回传箭头（从右向左），已经走过的段用高亮色
+    for (var seg = 0; seg < N_HOPS; seg++) {
+      var xFrom = nodeX(nodeCount - 1 - seg);
+      var xTo = nodeX(nodeCount - 2 - seg);
+      var passed = hopFull > seg;
+      var passing = hopFull === seg;
+      ctx.strokeStyle = (passed || passing) ? colorH : borderColor;
+      ctx.lineWidth = (passed || passing) ? 2.2 : 1.2;
+      ctx.beginPath(); ctx.moveTo(xFrom, marginY + 40); ctx.lineTo(xTo, marginY + 40); ctx.stroke();
+      // 箭头方向朝左
+      if (passed || passing) {
+        ctx.beginPath();
+        ctx.moveTo(xTo, marginY + 40);
+        ctx.lineTo(xTo + 6, marginY + 36);
+        ctx.lineTo(xTo + 6, marginY + 44);
+        ctx.closePath();
+        ctx.fillStyle = colorH;
+        ctx.fill();
+      }
+    }
+
+    // 回传中的小球（脉冲）位置
+    if (hopFull < N_HOPS) {
+      var xFrom = nodeX(nodeCount - 1 - hopFull);
+      var xTo = nodeX(nodeCount - 2 - hopFull);
+      var px = xFrom + (xTo - xFrom) * hopFrac;
+      var curCum = Math.pow(factor, hopFull + hopFrac);
+      var radius = mode === 'vanish' ? Math.max(2, 8 * Math.min(1, curCum)) : Math.min(14, 4 + curCum * 0.5);
+      ctx.beginPath();
+      ctx.arc(px, marginY + 40, radius, 0, Math.PI * 2);
+      ctx.fillStyle = (mode === 'explode' && curCum > 1e6) ? bad : colorPulse;
+      ctx.fill();
+    }
+
+    // ---- 数值面板 ----
+    var hopsBackNow = Math.min(N_HOPS, Math.round(hopFloat));
+    var cumNow = Math.pow(factor, hopsBackNow);
+    var isOverflow = mode === 'explode' && cumNow > 1e6;
+
+    hopValEl.textContent = hopsBackNow;
+    factorValEl.textContent = (mode === 'vanish' ? whh().toFixed(1) : whh().toFixed(1)) + ' × ' + TANH_AVG.toFixed(1) + ' = ' + factor.toFixed(2);
+    cumValEl.textContent = isOverflow ? 'NaN（数值溢出）' : cumNow.toPrecision(cumNow < 0.01 ? 2 : 4);
+    cumValEl.className = 'row-value ' + (mode === 'vanish' ? (cumNow < 0.01 ? 'warn' : '') : (isOverflow ? 'warn' : (cumNow > 3 ? 'warn' : '')));
+
+    formulaBox.textContent =
+      '∂h_T/∂h_(T-' + hopsBackNow + ') = ∏ tanh\'(z_t)·w_hh  （共 ' + hopsBackNow + ' 项连乘）\n' +
+      '                     ≈ (' + factor.toFixed(2) + ')^' + hopsBackNow +
+      ' = ' + (isOverflow ? 'NaN' : cumNow.toPrecision(cumNow < 0.01 ? 2 : 4));
+
+    if (!reduceMotion) requestAnimationFrame(render);
+  }
+
+  requestAnimationFrame(render);
+})();
+</script>
+</body>
+</html>

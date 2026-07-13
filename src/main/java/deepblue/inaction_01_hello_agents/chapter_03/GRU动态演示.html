@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>GRU 动态演示</title>
+<style>
+  :root {
+    --bg:#faf9f6; --surface:#ffffff; --surface-2:#f1efe9;
+    --text:#1b1e22; --text-2:#5b5c57; --text-3:#8b8a83;
+    --border:rgba(27,30,34,0.12);
+    --gate-z:#f59e0b; --gate-r:#3b82f6; --gate-h:#8b5cf6;
+    --good:#0ca30c; --bad:#d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#14161a; --surface:#1c1f24; --surface-2:#22252b;
+      --text:#eceae4; --text-2:#a7a9a0; --text-3:#797b76;
+      --border:rgba(236,234,228,0.14);
+      --gate-z:#f0985e; --gate-r:#5b9bef; --gate-h:#a78bfa;
+      --good:#3fbd7c; --bad:#e0645a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; justify-content: center; padding: 32px 16px;
+  }
+  .panel {
+    width: 100%; max-width: 720px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 16px; padding: 24px;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  h1 { margin: 0; font-size: 20px; }
+  .stage { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+  canvas { max-width: 100%; height: auto; background: var(--surface-2); border-radius: 10px; }
+  .readout { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .row-label { font-size: 13px; color: var(--text-2); }
+  .row-value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .gates { display: flex; flex-direction: column; gap: 8px; }
+  .gate-row { display: flex; align-items: center; gap: 8px; }
+  .gate-label { width: 66px; font-size: 12px; font-family: ui-monospace, monospace; flex-shrink: 0; }
+  .gate-track { position: relative; flex: 1; height: 12px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+  .gate-fill { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 4px; }
+  .gate-num { width: 46px; text-align: right; font-size: 12px; font-family: ui-monospace, monospace; color: var(--text-2); flex-shrink: 0; }
+  .fill-z { background: var(--gate-z); } .fill-r { background: var(--gate-r); }
+  .mix-track { position: relative; height: 20px; border-radius: 6px; background: var(--surface-2); overflow: hidden; }
+  .mix-old { position: absolute; top: 0; bottom: 0; left: 0; background: var(--text-3); opacity: 0.55; }
+  .mix-new { position: absolute; top: 0; bottom: 0; right: 0; background: var(--gate-h); }
+  .caption { font-size: 13px; color: var(--text-3); margin: 0; }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <h1>GRU：更新门在旧状态与候选值之间插值</h1>
+    <div class="stage">
+      <canvas id="c" width="440" height="180" aria-label="GRU 单元结构动态演示，展示重置门、更新门与隐藏状态的实时插值"></canvas>
+      <div class="readout">
+        <div class="row"><span class="row-label">时间步 t</span><span class="row-value" id="stepVal">1</span></div>
+        <div class="row"><span class="row-label">输入 xₜ</span><span class="row-value" id="xVal">0.00</span></div>
+        <div class="row"><span class="row-label">候选值 h̃ₜ</span><span class="row-value" id="hcandVal">0.00</span></div>
+        <div class="row"><span class="row-label">隐藏状态 hₜ</span><span class="row-value" id="hVal">0.00</span></div>
+        <div class="gates">
+          <div class="gate-row">
+            <span class="gate-label" style="color:var(--gate-r)">r_t 重置</span>
+            <div class="gate-track"><div class="gate-fill fill-r" id="barR"></div></div>
+            <span class="gate-num" id="numR">0.00</span>
+          </div>
+          <div class="gate-row">
+            <span class="gate-label" style="color:var(--gate-z)">z_t 更新</span>
+            <div class="gate-track"><div class="gate-fill fill-z" id="barZ"></div></div>
+            <span class="gate-num" id="numZ">0.00</span>
+          </div>
+        </div>
+        <div>
+          <div class="row-label" style="margin-bottom:4px;">h_t = (1-z_t)·h_(t-1) + z_t·h̃_t</div>
+          <div class="mix-track">
+            <div class="mix-old" id="mixOld"></div>
+            <div class="mix-new" id="mixNew"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="caption">
+      灰色段是「旧状态占比 (1-z_t)」，紫色段是「候选值占比 z_t」，两段加起来永远填满整条
+      进度条——这就是 GRU 用一个更新门把「遗忘」和「写入」耦合在一起的凸组合，不会像
+      LSTM 那样让两个独立门同时偏大导致数值失控。z_t 越接近 0，新的 h_t 就越接近上一步
+      的 h_(t-1)，梯度反传时几乎不衰减；z_t 越接近 1，则几乎完全替换成候选值 h̃_t。
+    </p>
+  </div>
+<script>
+(function () {
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  var stepValEl = document.getElementById('stepVal');
+  var xValEl = document.getElementById('xVal');
+  var hcandValEl = document.getElementById('hcandVal');
+  var hValEl = document.getElementById('hVal');
+  var barR = document.getElementById('barR'), numR = document.getElementById('numR');
+  var barZ = document.getElementById('barZ'), numZ = document.getElementById('numZ');
+  var mixOld = document.getElementById('mixOld'), mixNew = document.getElementById('mixNew');
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---- 极小的 GRU 参数（1 维输入，1 维隐藏状态），与 GRU.md 第 4 节手算例子一致 ----
+  var Wzh = 0.8, Wzx = 0.4, bz = -0.1;
+  var Wrh = 0.6, Wrx = 0.3, br = 0.2;
+  var Whh = 0.5, Whx = 0.9, bh = 0.0;
+
+  var inputs = [0.8, -0.5, 0.6, 0.9, -0.7, 0.4, -0.3, 0.7];
+  var STEP_MS = reduceMotion ? 1 : 1800;
+
+  function sigmoid(x) { return 1 / (1 + Math.exp(-x)); }
+
+  function computeUpTo(stepFloat) {
+    var fullSteps = Math.floor(stepFloat);
+    var frac = stepFloat - fullSteps;
+    var h = 0;
+    var x = 0, z = 0, r = 0, hCand = 0, hNext = 0, hPrev = 0;
+    for (var t = 0; t <= fullSteps && t < inputs.length; t++) {
+      x = inputs[t];
+      hPrev = h;
+      z = sigmoid(Wzh * h + Wzx * x + bz);
+      r = sigmoid(Wrh * h + Wrx * x + br);
+      hCand = Math.tanh(Whx * x + Whh * (r * h) + bh);
+      var full = (1 - z) * h + z * hCand;
+      if (t === fullSteps && frac > 0) {
+        hNext = h + (full - h) * frac;
+      } else {
+        hNext = full;
+      }
+      h = hNext;
+    }
+    return { x: x, z: z, r: r, hCand: hCand, h: hNext, hPrev: hPrev, stepIndex: fullSteps % inputs.length };
+  }
+
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  function render(t) {
+    var w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    var text2 = cssVar('--text-2') || '#666';
+    var text3 = cssVar('--text-3') || '#999';
+    var colorR = cssVar('--gate-r') || '#3b82f6';
+    var colorZ = cssVar('--gate-z') || '#f59e0b';
+    var colorH = cssVar('--gate-h') || '#8b5cf6';
+
+    var time = reduceMotion ? 0 : t;
+    var stepFloat = (time / STEP_MS) % inputs.length;
+    var state = computeUpTo(stepFloat);
+
+    var hwY = 45;
+    ctx.strokeStyle = text3; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(30, hwY); ctx.lineTo(w - 30, hwY); ctx.stroke();
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillStyle = text3; ctx.textAlign = 'left';
+    ctx.fillText('h_(t-1)', 20, hwY - 10);
+    ctx.textAlign = 'right';
+    ctx.fillText('h_t', w - 20, hwY - 10);
+
+    var cx = w / 2, cy = hwY;
+    var offsetPrev = Math.max(-1, Math.min(1, state.hPrev)) * 20;
+    var offsetNow = Math.max(-1, Math.min(1, state.h)) * 20;
+    ctx.beginPath(); ctx.arc(cx - 60, cy - offsetPrev, 6, 0, Math.PI * 2);
+    ctx.fillStyle = text3; ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + 60, cy - offsetNow, 7, 0, Math.PI * 2);
+    ctx.fillStyle = colorH; ctx.fill();
+
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = colorR; ctx.fillText('r_t 参考旧记忆', w * 0.28, hwY + 24);
+    ctx.fillStyle = colorZ; ctx.fillText('z_t 新旧混合比例', w * 0.68, hwY + 24);
+
+    var gateY = 100, gateW = 100, gateH = 42;
+    var gates = [
+      { text: 'r_t', color: colorR, x: w / 2 - 130 },
+      { text: 'z_t', color: colorZ, x: w / 2 + 30 }
+    ];
+    for (var idx = 0; idx < gates.length; idx++) {
+      var gx = gates[idx].x;
+      ctx.strokeStyle = gates[idx].color; ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      var r0 = 9;
+      ctx.moveTo(gx + r0, gateY);
+      ctx.arcTo(gx + gateW, gateY, gx + gateW, gateY + gateH, r0);
+      ctx.arcTo(gx + gateW, gateY + gateH, gx, gateY + gateH, r0);
+      ctx.arcTo(gx, gateY + gateH, gx, gateY, r0);
+      ctx.arcTo(gx, gateY, gx + gateW, gateY, r0);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fillStyle = gates[idx].color;
+      ctx.font = '13px system-ui, sans-serif';
+      ctx.fillText(gates[idx].text, gx + gateW / 2, gateY + gateH / 2 + 5);
+    }
+
+    stepValEl.textContent = (state.stepIndex + 1) + ' / ' + inputs.length;
+    xValEl.textContent = state.x.toFixed(2);
+    hcandValEl.textContent = state.hCand.toFixed(3);
+    hValEl.textContent = state.h.toFixed(3);
+
+    setGateBar(barR, numR, state.r);
+    setGateBar(barZ, numZ, state.z);
+
+    var zPct = Math.max(0, Math.min(1, state.z)) * 100;
+    mixOld.style.width = (100 - zPct) + '%';
+    mixNew.style.width = zPct + '%';
+
+    if (!reduceMotion) requestAnimationFrame(render);
+  }
+
+  function setGateBar(fillEl, numEl, pct01) {
+    var pct = Math.max(0, Math.min(1, pct01)) * 100;
+    fillEl.style.width = pct + '%';
+    numEl.textContent = pct01.toFixed(2);
+  }
+
+  requestAnimationFrame(render);
+})();
+</script>
+</body>
+</html>

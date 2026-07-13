@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>LSTM 动态演示</title>
+<style>
+  :root {
+    --bg:#faf9f6; --surface:#ffffff; --surface-2:#f1efe9;
+    --text:#1b1e22; --text-2:#5b5c57; --text-3:#8b8a83;
+    --border:rgba(27,30,34,0.12);
+    --gate-f:#3b82f6; --gate-i:#10b981; --gate-g:#8b5cf6; --gate-o:#f59e0b;
+    --good:#0ca30c; --bad:#d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#14161a; --surface:#1c1f24; --surface-2:#22252b;
+      --text:#eceae4; --text-2:#a7a9a0; --text-3:#797b76;
+      --border:rgba(236,234,228,0.14);
+      --gate-f:#5b9bef; --gate-i:#3fbd7c; --gate-g:#a78bfa; --gate-o:#f0985e;
+      --good:#3fbd7c; --bad:#e0645a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; justify-content: center; padding: 32px 16px;
+  }
+  .panel {
+    width: 100%; max-width: 780px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 16px; padding: 24px;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  h1 { margin: 0; font-size: 20px; }
+  .stage { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+  canvas { max-width: 100%; height: auto; background: var(--surface-2); border-radius: 10px; }
+  .readout { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .row-label { font-size: 13px; color: var(--text-2); }
+  .row-value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .gates { display: flex; flex-direction: column; gap: 8px; }
+  .gate-row { display: flex; align-items: center; gap: 8px; }
+  .gate-label { width: 66px; font-size: 12px; font-family: ui-monospace, monospace; flex-shrink: 0; }
+  .gate-track { position: relative; flex: 1; height: 12px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+  .gate-fill { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 4px; }
+  .gate-num { width: 46px; text-align: right; font-size: 12px; font-family: ui-monospace, monospace; color: var(--text-2); flex-shrink: 0; }
+  .fill-f { background: var(--gate-f); } .fill-i { background: var(--gate-i); }
+  .fill-g { background: var(--gate-g); } .fill-o { background: var(--gate-o); }
+  .caption { font-size: 13px; color: var(--text-3); margin: 0; }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <h1>LSTM：细胞状态与三个门的动态演示</h1>
+    <div class="stage">
+      <canvas id="c" width="440" height="230" aria-label="LSTM 单元结构动态演示，展示细胞状态高速公路与三个门的实时强度"></canvas>
+      <div class="readout">
+        <div class="row"><span class="row-label">时间步 t</span><span class="row-value" id="stepVal">1</span></div>
+        <div class="row"><span class="row-label">输入 xₜ</span><span class="row-value" id="xVal">0.00</span></div>
+        <div class="row"><span class="row-label">细胞状态 cₜ</span><span class="row-value" id="cVal">0.00</span></div>
+        <div class="row"><span class="row-label">隐藏状态 hₜ</span><span class="row-value" id="hVal">0.00</span></div>
+        <div class="gates">
+          <div class="gate-row">
+            <span class="gate-label" style="color:var(--gate-f)">f_t 遗忘</span>
+            <div class="gate-track"><div class="gate-fill fill-f" id="barF"></div></div>
+            <span class="gate-num" id="numF">0.00</span>
+          </div>
+          <div class="gate-row">
+            <span class="gate-label" style="color:var(--gate-i)">i_t 输入</span>
+            <div class="gate-track"><div class="gate-fill fill-i" id="barI"></div></div>
+            <span class="gate-num" id="numI">0.00</span>
+          </div>
+          <div class="gate-row">
+            <span class="gate-label" style="color:var(--gate-g)">g_t 候选</span>
+            <div class="gate-track"><div class="gate-fill fill-g" id="barG"></div></div>
+            <span class="gate-num" id="numG">0.00</span>
+          </div>
+          <div class="gate-row">
+            <span class="gate-label" style="color:var(--gate-o)">o_t 输出</span>
+            <div class="gate-track"><div class="gate-fill fill-o" id="barO"></div></div>
+            <span class="gate-num" id="numO">0.00</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="caption">
+      顶部「高速公路」上的圆点代表细胞状态 cₜ：每一步先被遗忘门 f_t 缩放（蓝色滑块），
+      再叠加输入门 i_t × 候选值 g_t（绿色/紫色滑块）算出的新增量——始终是「缩放 + 相加」，
+      不会像普通 RNN 那样每一步都重新塞进 tanh 里压缩。右侧四条彩色柱状条是四个门的实时
+      强度（0~1），橙色输出门 o_t 决定这一步从 cₜ 里「读出」多少变成 hₜ。
+    </p>
+  </div>
+<script>
+(function () {
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  var stepValEl = document.getElementById('stepVal');
+  var xValEl = document.getElementById('xVal');
+  var cValEl = document.getElementById('cVal');
+  var hValEl = document.getElementById('hVal');
+  var barF = document.getElementById('barF'), numF = document.getElementById('numF');
+  var barI = document.getElementById('barI'), numI = document.getElementById('numI');
+  var barG = document.getElementById('barG'), numG = document.getElementById('numG');
+  var barO = document.getElementById('barO'), numO = document.getElementById('numO');
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---- 极小的 LSTM 参数（1 维输入，1 维隐藏/细胞状态）----
+  var Wfh = 0.8, Wfx = 0.5, bf = 0.1;
+  var Wih = 0.6, Wix = 0.4, bi = -0.2;
+  var Wgh = 0.5, Wgx = 0.9, bg = 0.0;
+  var Woh = 0.7, Wox = 0.3, bo = 0.1;
+
+  var inputs = [0.8, -0.5, 0.6, 0.9, -0.7, 0.4, -0.3, 0.7];
+  var STEP_MS = reduceMotion ? 1 : 1800;
+
+  function sigmoid(x) { return 1 / (1 + Math.exp(-x)); }
+
+  function computeUpTo(stepFloat) {
+    var fullSteps = Math.floor(stepFloat);
+    var frac = stepFloat - fullSteps;
+    var h = 0, c = 0;
+    var x = 0, f = 0, i = 0, g = 0, o = 0, cNext = 0, hNext = 0;
+    for (var t = 0; t <= fullSteps && t < inputs.length; t++) {
+      x = inputs[t];
+      f = sigmoid(Wfh * h + Wfx * x + bf);
+      i = sigmoid(Wih * h + Wix * x + bi);
+      g = Math.tanh(Wgh * h + Wgx * x + bg);
+      o = sigmoid(Woh * h + Wox * x + bo);
+      cNext = f * c + i * g;
+      hNext = o * Math.tanh(cNext);
+      if (t === fullSteps && frac > 0) {
+        // 插值展示「正在更新」的过渡效果
+        cNext = c + (cNext - c) * frac;
+        hNext = h + (hNext - h) * frac;
+      }
+      if (!(t === fullSteps && frac > 0)) { c = cNext; h = hNext; }
+    }
+    return {
+      x: x, f: f, i: i, g: g, o: o, c: cNext, h: hNext,
+      stepIndex: fullSteps % inputs.length
+    };
+  }
+
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  function drawArrow(x0, y0, x1, y1, color, width) {
+    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = width;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    var angle = Math.atan2(y1 - y0, x1 - x0), headLen = 7;
+    ctx.beginPath(); ctx.moveTo(x1, y1);
+    ctx.lineTo(x1 - headLen * Math.cos(angle - Math.PI / 6), y1 - headLen * Math.sin(angle - Math.PI / 6));
+    ctx.lineTo(x1 - headLen * Math.cos(angle + Math.PI / 6), y1 - headLen * Math.sin(angle + Math.PI / 6));
+    ctx.closePath(); ctx.fill();
+  }
+
+  function render(t) {
+    var w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    var border = cssVar('--border') || '#ddd';
+    var text3 = cssVar('--text-3') || '#999';
+    var colorF = cssVar('--gate-f') || '#3b82f6';
+    var colorI = cssVar('--gate-i') || '#10b981';
+    var colorG = cssVar('--gate-g') || '#8b5cf6';
+    var colorO = cssVar('--gate-o') || '#f59e0b';
+
+    var time = reduceMotion ? 0 : t;
+    var stepFloat = (time / STEP_MS) % inputs.length;
+    var state = computeUpTo(stepFloat);
+
+    var hwY = 45;
+    // 细胞状态高速公路
+    ctx.strokeStyle = text3; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(30, hwY); ctx.lineTo(w - 30, hwY); ctx.stroke();
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillStyle = text3; ctx.textAlign = 'left';
+    ctx.fillText('c_(t-1)', 20, hwY - 10);
+    ctx.textAlign = 'right';
+    ctx.fillText('c_t', w - 20, hwY - 10);
+
+    // 高速公路上表示当前细胞状态数值大小的圆点（clamp 到 [-1.2,1.2] 映射到公路上下方偏移）
+    var cx = w / 2, cy = hwY;
+    var offset = Math.max(-1, Math.min(1, state.c)) * 22;
+    ctx.beginPath();
+    ctx.arc(cx, cy - offset, 7, 0, Math.PI * 2);
+    ctx.fillStyle = colorG;
+    ctx.fill();
+    ctx.strokeStyle = text3; ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // 三个门作用点标注（遗忘 -> 输入 -> 输出）
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = colorF; ctx.fillText('×f', w * 0.32, hwY - 24);
+    ctx.fillStyle = colorI; ctx.fillText('+i·g', w * 0.62, hwY - 24);
+
+    // 下方：四个门的方块，随时间步高亮
+    var gateY = 150, gateW = 66, gateH = 42;
+    var labels = [
+      { key: 'f', text: 'f_t', color: colorF, val: state.f },
+      { key: 'i', text: 'i_t', color: colorI, val: state.i },
+      { key: 'g', text: 'g_t', color: colorG, val: (state.g + 1) / 2 },
+      { key: 'o', text: 'o_t', color: colorO, val: state.o }
+    ];
+    var gap = (w - 60 - gateW * 4) / 3;
+    for (var idx = 0; idx < labels.length; idx++) {
+      var gx = 30 + idx * (gateW + gap);
+      ctx.strokeStyle = labels[idx].color; ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      var r = 8;
+      ctx.moveTo(gx + r, gateY);
+      ctx.arcTo(gx + gateW, gateY, gx + gateW, gateY + gateH, r);
+      ctx.arcTo(gx + gateW, gateY + gateH, gx, gateY + gateH, r);
+      ctx.arcTo(gx, gateY + gateH, gx, gateY, r);
+      ctx.arcTo(gx, gateY, gx + gateW, gateY, r);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fillStyle = labels[idx].color;
+      ctx.font = '12px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(labels[idx].text, gx + gateW / 2, gateY + gateH / 2 + 5);
+
+      // 连线到高速公路（简化示意）
+      ctx.strokeStyle = labels[idx].color; ctx.lineWidth = 1.2;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(gx + gateW / 2, gateY);
+      ctx.lineTo(w / 2 + (idx - 1.5) * 14, hwY + 14);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // ---- 更新右侧面板 ----
+    stepValEl.textContent = (state.stepIndex + 1) + ' / ' + inputs.length;
+    xValEl.textContent = state.x.toFixed(2);
+    cValEl.textContent = state.c.toFixed(3);
+    hValEl.textContent = state.h.toFixed(3);
+
+    setGateBar(barF, numF, state.f);
+    setGateBar(barI, numI, state.i);
+    setGateBar(barG, numG, (state.g + 1) / 2, state.g.toFixed(2));
+    setGateBar(barO, numO, state.o);
+
+    if (!reduceMotion) requestAnimationFrame(render);
+  }
+
+  function setGateBar(fillEl, numEl, pct01, overrideText) {
+    var pct = Math.max(0, Math.min(1, pct01)) * 100;
+    fillEl.style.width = pct + '%';
+    numEl.textContent = overrideText !== undefined ? overrideText : pct01.toFixed(2);
+  }
+
+  requestAnimationFrame(render);
+})();
+</script>
+</body>
+</html>
