@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Transformer 动态演示</title>
+<style>
+  :root {
+    --bg:#faf9f6; --surface:#ffffff; --surface-2:#f1efe9;
+    --text:#1b1e22; --text-2:#5b5c57; --text-3:#8b8a83;
+    --border:rgba(27,30,34,0.12);
+    --tok1:#3b82f6; --tok2:#8b5cf6; --tok3:#10b981;
+    --accent:#f59e0b; --good:#0ca30c; --bad:#d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#14161a; --surface:#1c1f24; --surface-2:#22252b;
+      --text:#eceae4; --text-2:#a7a9a0; --text-3:#797b76;
+      --border:rgba(236,234,228,0.14);
+      --tok1:#5b9bef; --tok2:#a78bfa; --tok3:#3fbd7c;
+      --accent:#f0985e; --good:#3fbd7c; --bad:#e0645a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; justify-content: center; padding: 32px 16px;
+  }
+  .panel {
+    width: 100%; max-width: 760px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 16px; padding: 24px;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  h1 { margin: 0; font-size: 20px; }
+  .stage { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+  canvas { max-width: 100%; height: auto; background: var(--surface-2); border-radius: 10px; }
+  .readout { flex: 1; min-width: 250px; display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .row-label { font-size: 13px; color: var(--text-2); }
+  .row-value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .mode-badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .mode-encoder { background: rgba(16,185,129,0.16); color: var(--tok3); }
+  .mode-decoder { background: rgba(245,158,11,0.18); color: var(--accent); }
+  .weights { display: flex; flex-direction: column; gap: 8px; }
+  .w-row { display: flex; align-items: center; gap: 8px; }
+  .w-label { width: 70px; font-size: 12px; font-family: ui-monospace, monospace; flex-shrink: 0; }
+  .w-track { position: relative; flex: 1; height: 12px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+  .w-fill { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 4px; transition: none; }
+  .w-num { width: 46px; text-align: right; font-size: 12px; font-family: ui-monospace, monospace; color: var(--text-2); flex-shrink: 0; }
+  .caption { font-size: 13px; color: var(--text-3); margin: 0; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-2); flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <h1>Scaled Dot-Product Attention：每个 token 的输出是全序列的加权组合</h1>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--tok1)"></i>token 1　x₁=[1,0]</span>
+      <span><i class="dot" style="background:var(--tok2)"></i>token 2　x₂=[0,1]</span>
+      <span><i class="dot" style="background:var(--tok3)"></i>token 3　x₃=[1,1]</span>
+    </div>
+    <div class="stage">
+      <canvas id="c" width="460" height="300" aria-label="Transformer 注意力动态演示：上方三个 token 节点，中间滑动的 Query 标记通过粗细/透明度不同的连线向每个 token 请求信息，下方是 V 向量空间散点图，输出向量随权重变化移动"></canvas>
+      <div class="readout">
+        <div class="row">
+          <span class="row-label">模式</span>
+          <span class="row-value" id="modeVal"><span class="mode-badge mode-encoder">Encoder</span></span>
+        </div>
+        <div class="row"><span class="row-label">当前 Query</span><span class="row-value" id="qVal">token 1</span></div>
+        <div class="row"><span class="row-label">输出向量</span><span class="row-value" id="outVal">[0.00, 0.00]</span></div>
+        <div class="weights">
+          <div class="w-row">
+            <span class="w-label" style="color:var(--tok1)">→ token 1</span>
+            <div class="w-track"><div class="w-fill" id="w0" style="background:var(--tok1)"></div></div>
+            <span class="w-num" id="n0">0.00</span>
+          </div>
+          <div class="w-row">
+            <span class="w-label" style="color:var(--tok2)">→ token 2</span>
+            <div class="w-track"><div class="w-fill" id="w1" style="background:var(--tok2)"></div></div>
+            <span class="w-num" id="n1">0.00</span>
+          </div>
+          <div class="w-row">
+            <span class="w-label" style="color:var(--tok3)">→ token 3</span>
+            <div class="w-track"><div class="w-fill" id="w2" style="background:var(--tok3)"></div></div>
+            <span class="w-num" id="n2">0.00</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="caption">
+      数据和 <code>Transformer.md</code> §7 手算例子完全一致：<code>W_Q=W_K=I</code>（即
+      Q=K=X），<code>W_V</code> 交换两个维度。中间滑动的圆点代表当前发起查询的 token，
+      它到每个 token 的连线粗细/透明度就是 <code>softmax(Q·Kᵀ/√d_k)</code> 算出的注意力
+      权重；下方散点图里三个彩色点是各 token 的 <code>V</code> 向量，黑色点是
+      <code>weights·V</code> 加权求和得到的输出——可以看到它始终落在三个 V 向量围成的
+      范围内、且会随权重变化平滑移动。动画每轮先跑一遍 <b>Encoder</b>（无 mask，query
+      能看到全部 token），再跑一遍 <b>Decoder</b>（§3.4 的 causal mask，query 只能看到
+      自己和更早的 token）——对比两种模式下 token 1、2 的连线，能直观看到"看不到未来"
+      具体是怎么把某些连线直接掐掉的；token 3 因为本来就是序列最后一位，两种模式下完全
+      一样。
+    </p>
+  </div>
+<script>
+(function () {
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  var modeValEl = document.getElementById('modeVal');
+  var qValEl = document.getElementById('qVal');
+  var outValEl = document.getElementById('outVal');
+  var wFill = [document.getElementById('w0'), document.getElementById('w1'), document.getElementById('w2')];
+  var wNum = [document.getElementById('n0'), document.getElementById('n1'), document.getElementById('n2')];
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---- 与 Transformer.md §7 手算例子完全一致：W_Q=W_K=I（Q=K=X），W_V 交换两维 ----
+  var X = [[1, 0], [0, 1], [1, 1]];   // x1, x2, x3，同时也是 Q 和 K
+  var V = [[0, 1], [1, 0], [1, 1]];   // 交换两维之后的 value 向量
+  var dK = 2;
+
+  function dot(a, b) { return a[0] * b[0] + a[1] * b[1]; }
+
+  function computeWeights(qIdx, masked) {
+    var scores = [];
+    for (var j = 0; j < 3; j++) {
+      scores.push((masked && j > qIdx) ? -Infinity : dot(X[qIdx], X[j]) / Math.sqrt(dK));
+    }
+    var max = Math.max(scores[0], scores[1], scores[2]);
+    var exps = scores.map(function (s) { return s === -Infinity ? 0 : Math.exp(s - max); });
+    var sum = exps[0] + exps[1] + exps[2];
+    return exps.map(function (e) { return e / sum; });
+  }
+
+  function computeOutput(weights) {
+    return [
+      weights[0] * V[0][0] + weights[1] * V[1][0] + weights[2] * V[2][0],
+      weights[0] * V[0][1] + weights[1] * V[1][1] + weights[2] * V[2][1]
+    ];
+  }
+
+  // 6 个离散步骤：0-2 是 Encoder（query=1,2,3，无 mask），3-5 是 Decoder（query=1,2,3，加 causal mask）
+  var steps = [];
+  for (var q = 0; q < 3; q++) steps.push({ q: q, masked: false });
+  for (var q2 = 0; q2 < 3; q2++) steps.push({ q: q2, masked: true });
+  steps.forEach(function (s) {
+    s.weights = computeWeights(s.q, s.masked);
+    s.output = computeOutput(s.weights);
+  });
+
+  var STEP_MS = reduceMotion ? 1 : 1900;
+  var TOTAL = steps.length;
+
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  function render(t) {
+    var w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    var time = reduceMotion ? 0 : t;
+    var stepFloat = (time / STEP_MS) % TOTAL;
+    var idx = Math.floor(stepFloat);
+    var frac = stepFloat - idx;
+    var next = steps[(idx + 1) % TOTAL];
+    var cur = steps[idx];
+
+    var weights = [
+      lerp(cur.weights[0], next.weights[0], frac),
+      lerp(cur.weights[1], next.weights[1], frac),
+      lerp(cur.weights[2], next.weights[2], frac)
+    ];
+    var output = [lerp(cur.output[0], next.output[0], frac), lerp(cur.output[1], next.output[1], frac)];
+    var qPos = lerp(cur.q, next.q, frac);
+
+    var colors = [cssVar('--tok1') || '#3b82f6', cssVar('--tok2') || '#8b5cf6', cssVar('--tok3') || '#10b981'];
+    var text2 = cssVar('--text-2') || '#666';
+    var text3 = cssVar('--text-3') || '#999';
+
+    // ---- 上半部分：token 节点 + 滑动的 query 标记 + 权重连线 ----
+    var tokenX = [w * 0.2, w * 0.5, w * 0.8];
+    var tokenY = 36;
+    for (var j = 0; j < 3; j++) {
+      ctx.beginPath();
+      ctx.arc(tokenX[j], tokenY, 15, 0, Math.PI * 2);
+      ctx.fillStyle = colors[j];
+      ctx.fill();
+      ctx.font = '11px ui-monospace, monospace';
+      ctx.fillStyle = text2;
+      ctx.textAlign = 'center';
+      ctx.fillText('x' + (j + 1) + '=[' + X[j][0] + ',' + X[j][1] + ']', tokenX[j], tokenY + 32);
+    }
+
+    var qX = tokenX[0] + (tokenX[2] - tokenX[0]) * (qPos / 2); // q 索引（可能带小数）线性插值出滑动位置
+    var qY = 130;
+
+    for (var k = 0; k < 3; k++) {
+      var wgt = weights[k];
+      ctx.beginPath();
+      ctx.moveTo(qX, qY - 8);
+      var midX = (qX + tokenX[k]) / 2;
+      ctx.quadraticCurveTo(midX, (qY + tokenY) / 2, tokenX[k], tokenY + 15);
+      ctx.strokeStyle = colors[k];
+      ctx.globalAlpha = 0.12 + wgt * 0.88;
+      ctx.lineWidth = 1 + wgt * 6;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.beginPath();
+    ctx.arc(qX, qY, 11, 0, Math.PI * 2);
+    ctx.fillStyle = text3;
+    ctx.fill();
+    ctx.strokeStyle = cur.masked ? (cssVar('--accent') || '#f59e0b') : (cssVar('--tok3') || '#10b981');
+    ctx.lineWidth = 2.4;
+    ctx.stroke();
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.fillStyle = text2;
+    ctx.textAlign = 'center';
+    ctx.fillText('Query', qX, qY + 28);
+
+    // ---- 下半部分：V 向量空间散点图 + 加权输出点 ----
+    var ox = w * 0.18, oy = 258, scale = w * 0.55;
+    ctx.strokeStyle = text3;
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(ox, oy); ctx.lineTo(ox + scale, oy);
+    ctx.moveTo(ox, oy); ctx.lineTo(ox, oy - scale);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.fillStyle = text3;
+    ctx.textAlign = 'left';
+    ctx.fillText('V 向量空间', ox, oy - scale - 8);
+
+    function toPx(v) { return [ox + v[0] * scale, oy - v[1] * scale]; }
+
+    for (var m = 0; m < 3; m++) {
+      var p = toPx(V[m]);
+      var opx = toPx(output);
+      ctx.beginPath();
+      ctx.moveTo(p[0], p[1]);
+      ctx.lineTo(opx[0], opx[1]);
+      ctx.strokeStyle = colors[m];
+      ctx.globalAlpha = 0.15 + weights[m] * 0.7;
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], 7, 0, Math.PI * 2);
+      ctx.fillStyle = colors[m];
+      ctx.fill();
+      ctx.font = '10px ui-monospace, monospace';
+      ctx.fillStyle = text2;
+      ctx.textAlign = 'center';
+      ctx.fillText('v' + (m + 1), p[0], p[1] - 12);
+    }
+
+    var outPx = toPx(output);
+    ctx.beginPath();
+    ctx.arc(outPx[0], outPx[1], 8, 0, Math.PI * 2);
+    ctx.fillStyle = text2;
+    ctx.fill();
+    ctx.strokeStyle = cssVar('--surface') || '#fff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // ---- 更新右侧读数面板 ----
+    modeValEl.innerHTML = cur.masked
+      ? '<span class="mode-badge mode-decoder">Decoder（causal mask）</span>'
+      : '<span class="mode-badge mode-encoder">Encoder（无 mask）</span>';
+    qValEl.textContent = 'token ' + (cur.q + 1);
+    outValEl.textContent = '[' + output[0].toFixed(3) + ', ' + output[1].toFixed(3) + ']';
+    for (var b = 0; b < 3; b++) {
+      var pct = Math.max(0, Math.min(1, weights[b])) * 100;
+      wFill[b].style.width = pct + '%';
+      wNum[b].textContent = weights[b].toFixed(3);
+    }
+
+    if (!reduceMotion) requestAnimationFrame(render);
+  }
+
+  requestAnimationFrame(render);
+})();
+</script>
+</body>
+</html>

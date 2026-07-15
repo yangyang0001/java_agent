@@ -380,77 +380,326 @@ output3 ≈ [0.752, 0.752]
 "整段上下文全量可见但窗口有限、且计算随长度平方增长"的新代价。这正是为什么
 Transformer 能撑起现在动辄成千上万 token 上下文的大语言模型，而纯 RNN 系列做不到。
 
-## 9. Java 实现示例
+## 9. 动态演示
+
+▶ [点击查看动态演示](./Transformer动态演示.html)：数据和 §7 手算例子完全一致
+（`W_Q=W_K=I`，`W_V` 交换两维）。图里滑动的圆点是当前发起查询的 token，它到每个
+token 的连线粗细/透明度就是 `softmax(Q·Kᵀ/√d_k)` 算出的注意力权重（对应 §3.2 的
+数据流图）；下方散点图里三个彩色点是各 token 的 `V` 向量，黑色点是
+`weights·V` 加权求和得到的输出，会随权重变化平滑移动。动画会轮流跑一遍
+**Encoder**（无 mask，query 能看到全部 token）和一遍 **Decoder**（§3.4 的 causal
+mask，query 只能看到自己和更早的 token）——对比两种模式下 token 1、2 的连线，可以
+直观看到"看不到未来"具体是怎么把某些连线直接掐掉的；token 3 因为本来就是序列最
+后一位，两种模式下完全一样。
+
+## 10. Java 实现示例
+
+下面是 `Transformer.java` 的完整实现——把 §2~§8 讲到的每个组件都串起来：Token
+Embedding、位置编码、Multi-Head Attention、Masked Self-Attention、
+Cross-Attention、FFN、残差连接+LayerNorm、输出层，对应 §4 架构图里 Encoder 和
+Decoder 两条完整链路，能跑通一次 seq2seq 前向传播。
 
 ```java
-public class SimpleSelfAttention {
+package deepblue.inaction_01_hello_agents.chapter_03;
 
-    private final double[][] wq, wk, wv; // d_model x d_model 的投影矩阵
-    private final int dK;
+import java.util.Random;
 
-    public SimpleSelfAttention(double[][] wq, double[][] wk, double[][] wv) {
-        this.wq = wq; this.wk = wk; this.wv = wv;
-        this.dK = wq[0].length;
+public class Transformer {
+
+    private final TokenEmbedding srcEmbedding;
+    private final TokenEmbedding tgtEmbedding;
+    private final TransformerEncoder encoder;
+    private final TransformerDecoder decoder;
+    private final double[][] wOut; // §3.8：d_model -> tgt 词表大小
+
+    public Transformer(int srcVocabSize, int tgtVocabSize, int dModel, int numHeads,
+                        int dFf, int numLayers, Random rng) {
+        this.srcEmbedding = new TokenEmbedding(srcVocabSize, dModel, rng);
+        this.tgtEmbedding = new TokenEmbedding(tgtVocabSize, dModel, rng);
+        this.encoder = new TransformerEncoder(numLayers, dModel, numHeads, dFf, rng);
+        this.decoder = new TransformerDecoder(numLayers, dModel, numHeads, dFf, rng);
+        this.wOut = randomMatrix(dModel, tgtVocabSize, rng, 1.0 / Math.sqrt(dModel));
     }
 
-    /** 对整段输入一次性并行计算（没有任何"必须等上一步"的依赖） */
-    public double[][] forward(double[][] inputs) {
-        int n = inputs.length;
-        double[][] q = project(inputs, wq);
-        double[][] k = project(inputs, wk);
-        double[][] v = project(inputs, wv);
+    /** 一次完整的 seq2seq 前向传播，返回每个目标位置在词表上的概率分布。 */
+    public double[][] forward(int[] srcIds, int[] tgtIds) {
+        double[][] encoderOutput = encoder.forward(srcEmbedding.forward(srcIds));
+        double[][] decoderOutput = decoder.forward(tgtEmbedding.forward(tgtIds), encoderOutput);
+        double[][] logits = matmul(decoderOutput, wOut);
+        return softmaxRows(logits);
+    }
 
-        double[][] output = new double[n][dK];
-        for (int i = 0; i < n; i++) {
-            double[] scores = new double[n];
-            for (int j = 0; j < n; j++) {
-                scores[j] = dot(q[i], k[j]) / Math.sqrt(dK); // 缩放点积
+    // ================= Token Embedding =================
+
+    static class TokenEmbedding {
+        private final double[][] table;
+        private final int dModel;
+
+        TokenEmbedding(int vocabSize, int dModel, Random rng) {
+            this.table = randomMatrix(vocabSize, dModel, rng, 1.0 / Math.sqrt(dModel));
+            this.dModel = dModel;
+        }
+
+        double[][] forward(int[] tokenIds) {
+            double scaleFactor = Math.sqrt(dModel); // 原论文里 embedding 额外乘 √d_model
+            double[][] out = new double[tokenIds.length][dModel];
+            for (int i = 0; i < tokenIds.length; i++) {
+                for (int d = 0; d < dModel; d++) {
+                    out[i][d] = table[tokenIds[i]][d] * scaleFactor;
+                }
             }
-            double[] weights = softmax(scores);
-            for (int j = 0; j < n; j++) {
-                for (int d = 0; d < dK; d++) {
-                    output[i][d] += weights[j] * v[j][d]; // 按权重加权求和 V
+            return out;
+        }
+    }
+
+    // ================= Multi-Head Attention（§3.3） =================
+
+    static class MultiHeadAttention {
+        private final int dModel, numHeads, dK;
+        private final double[][] wq, wk, wv, wo;
+
+        MultiHeadAttention(int dModel, int numHeads, Random rng) {
+            this.dModel = dModel;
+            this.numHeads = numHeads;
+            this.dK = dModel / numHeads;
+            double s = 1.0 / Math.sqrt(dModel);
+            this.wq = randomMatrix(dModel, dModel, rng, s);
+            this.wk = randomMatrix(dModel, dModel, rng, s);
+            this.wv = randomMatrix(dModel, dModel, rng, s);
+            this.wo = randomMatrix(dModel, dModel, rng, s);
+        }
+
+        /**
+         * xQ、xKV 分开传，是为了同一份代码服务三种场景：Encoder 自注意力
+         * （xQ=xKV=encoder 序列）、Decoder 掩码自注意力（xQ=xKV=decoder 序列，
+         * 另加 causal mask）、Cross-Attention（xQ=decoder 序列，xKV=encoder
+         * 输出，mask=null，§3.5）。
+         */
+        double[][] forward(double[][] xQ, double[][] xKV, double[][] mask) {
+            double[][] q = matmul(xQ, wq);
+            double[][] k = matmul(xKV, wk);
+            double[][] v = matmul(xKV, wv);
+
+            double[][] concat = new double[xQ.length][dModel];
+            for (int h = 0; h < numHeads; h++) {
+                double[][] qh = sliceCols(q, h * dK, dK);
+                double[][] kh = sliceCols(k, h * dK, dK);
+                double[][] vh = sliceCols(v, h * dK, dK);
+                double[][] headOut = scaledDotProductAttention(qh, kh, vh, mask);
+                for (int i = 0; i < xQ.length; i++) {
+                    System.arraycopy(headOut[i], 0, concat[i], h * dK, dK);
+                }
+            }
+            return matmul(concat, wo);
+        }
+    }
+
+    // ================= Feed-Forward Network（§3.6） =================
+
+    static class FeedForward {
+        private final double[][] w1, w2;
+        private final double[] b1, b2;
+
+        FeedForward(int dModel, int dFf, Random rng) {
+            this.w1 = randomMatrix(dModel, dFf, rng, 1.0 / Math.sqrt(dModel));
+            this.b1 = new double[dFf];
+            this.w2 = randomMatrix(dFf, dModel, rng, 1.0 / Math.sqrt(dFf));
+            this.b2 = new double[dModel];
+        }
+
+        double[][] forward(double[][] x) {
+            double[][] hidden = relu(addBias(matmul(x, w1), b1));
+            return addBias(matmul(hidden, w2), b2);
+        }
+    }
+
+    // ================= Encoder / Decoder 层（§3.7 Add & Norm） =================
+
+    static class EncoderLayer {
+        private final MultiHeadAttention mha;
+        private final FeedForward ffn;
+
+        EncoderLayer(int dModel, int numHeads, int dFf, Random rng) {
+            this.mha = new MultiHeadAttention(dModel, numHeads, rng);
+            this.ffn = new FeedForward(dModel, dFf, rng);
+        }
+
+        double[][] forward(double[][] x) {
+            x = layerNorm(add(x, mha.forward(x, x, null)));
+            x = layerNorm(add(x, ffn.forward(x)));
+            return x;
+        }
+    }
+
+    static class DecoderLayer {
+        private final MultiHeadAttention selfMha;
+        private final MultiHeadAttention crossMha; // §3.5
+        private final FeedForward ffn;
+
+        DecoderLayer(int dModel, int numHeads, int dFf, Random rng) {
+            this.selfMha = new MultiHeadAttention(dModel, numHeads, rng);
+            this.crossMha = new MultiHeadAttention(dModel, numHeads, rng);
+            this.ffn = new FeedForward(dModel, dFf, rng);
+        }
+
+        double[][] forward(double[][] x, double[][] encoderOutput, double[][] causalMask) {
+            x = layerNorm(add(x, selfMha.forward(x, x, causalMask)));
+            x = layerNorm(add(x, crossMha.forward(x, encoderOutput, null))); // Q←decoder, K/V←encoder
+            x = layerNorm(add(x, ffn.forward(x)));
+            return x;
+        }
+    }
+
+    static class TransformerEncoder {
+        private final int dModel;
+        private final EncoderLayer[] layers;
+
+        TransformerEncoder(int numLayers, int dModel, int numHeads, int dFf, Random rng) {
+            this.dModel = dModel;
+            this.layers = new EncoderLayer[numLayers];
+            for (int i = 0; i < numLayers; i++) {
+                layers[i] = new EncoderLayer(dModel, numHeads, dFf, rng);
+            }
+        }
+
+        double[][] forward(double[][] tokenEmbeddings) {
+            double[][] x = add(tokenEmbeddings, positionalEncoding(tokenEmbeddings.length, dModel));
+            for (EncoderLayer layer : layers) {
+                x = layer.forward(x);
+            }
+            return x;
+        }
+    }
+
+    static class TransformerDecoder {
+        private final int dModel;
+        private final DecoderLayer[] layers;
+
+        TransformerDecoder(int numLayers, int dModel, int numHeads, int dFf, Random rng) {
+            this.dModel = dModel;
+            this.layers = new DecoderLayer[numLayers];
+            for (int i = 0; i < numLayers; i++) {
+                layers[i] = new DecoderLayer(dModel, numHeads, dFf, rng);
+            }
+        }
+
+        double[][] forward(double[][] tokenEmbeddings, double[][] encoderOutput) {
+            int seqLen = tokenEmbeddings.length;
+            double[][] x = add(tokenEmbeddings, positionalEncoding(seqLen, dModel));
+            double[][] mask = causalMask(seqLen);
+            for (DecoderLayer layer : layers) {
+                x = layer.forward(x, encoderOutput, mask);
+            }
+            return x;
+        }
+    }
+
+    // ================= 基础数学工具 =================
+
+    /** §3.1：正弦/余弦位置编码。 */
+    static double[][] positionalEncoding(int seqLen, int dModel) {
+        double[][] pe = new double[seqLen][dModel];
+        for (int pos = 0; pos < seqLen; pos++) {
+            for (int i = 0; i < dModel; i += 2) {
+                double angle = pos / Math.pow(10000, (2.0 * (i / 2)) / dModel);
+                pe[pos][i] = Math.sin(angle);
+                if (i + 1 < dModel) {
+                    pe[pos][i + 1] = Math.cos(angle);
                 }
             }
         }
-        return output;
+        return pe;
     }
 
-    private static double[][] project(double[][] x, double[][] w) {
-        double[][] out = new double[x.length][w[0].length];
-        for (int i = 0; i < x.length; i++) {
-            for (int c = 0; c < w[0].length; c++) {
-                for (int r = 0; r < w.length; r++) {
-                    out[i][c] += x[i][r] * w[r][c];
-                }
+    /** §3.4：下三角矩阵，1=可见、0=遮蔽，用来让 Decoder 看不到未来位置。 */
+    static double[][] causalMask(int seqLen) {
+        double[][] mask = new double[seqLen][seqLen];
+        for (int i = 0; i < seqLen; i++) {
+            for (int j = 0; j <= i; j++) {
+                mask[i][j] = 1.0;
             }
         }
-        return out;
+        return mask;
     }
 
-    private static double[] softmax(double[] scores) {
-        double max = Double.NEGATIVE_INFINITY;
-        for (double s : scores) max = Math.max(max, s);
-        double sum = 0;
-        double[] exp = new double[scores.length];
+    /** §3.2：Attention(Q,K,V) = softmax(Q·Kᵀ / √d_k)·V。 */
+    static double[][] scaledDotProductAttention(double[][] q, double[][] k, double[][] v, double[][] mask) {
+        int dK = q[0].length;
+        double[][] scores = matmul(q, transpose(k));
+        double scaleFactor = Math.sqrt(dK);
         for (int i = 0; i < scores.length; i++) {
-            exp[i] = Math.exp(scores[i] - max); // 减去最大值防止数值溢出
-            sum += exp[i];
+            for (int j = 0; j < scores[0].length; j++) {
+                scores[i][j] /= scaleFactor;
+                if (mask != null && mask[i][j] == 0) {
+                    scores[i][j] = -1e9; // 屏蔽的位置 softmax 后权重趋于 0
+                }
+            }
         }
-        for (int i = 0; i < exp.length; i++) exp[i] /= sum;
-        return exp;
+        return matmul(softmaxRows(scores), v);
     }
 
-    private static double dot(double[] a, double[] b) {
-        double sum = 0;
-        for (int i = 0; i < a.length; i++) sum += a[i] * b[i];
-        return sum;
-    }
+    // matmul / transpose / add / addBias / relu / layerNorm / softmaxRows /
+    // sliceCols / randomMatrix 等基础矩阵工具方法省略，完整实现见 Transformer.java
 }
 ```
 
-对照 §7 的手算过程：`forward` 里外层的 `for (int i = 0; i < n; i++)` 循环，每一次
-迭代之间**没有任何数据依赖**——`output[i]` 只用到 `q[i]` 和全部的 `k、v`，不依赖
-`output[i-1]`。这正是它能被整批并行计算（在真实实现里是几次矩阵乘法，而不是 Java
-里为了讲清楚原理写的三层 for 循环）的原因，也是它和 `SimpleRNN`/`SimpleLSTM`/
-`SimpleGRU` 里那个"必须按 `t=0,1,2...` 顺序跑的 for 循环"最直观的代码级差异。
+对照 §7 的手算过程：`scaledDotProductAttention` 对每个 token 的计算**没有任何数据
+依赖**——第 `i` 行输出只用到 `q[i]` 和全部的 `k、v`，不依赖其它行的输出，这正是它
+能被整批矩阵乘法并行算完（而不是像 `SimpleRNN`/`SimpleLSTM`/`SimpleGRU` 那样必须
+按 `t=0,1,2...` 顺序跑 for 循环）的原因。`DecoderLayer` 里的 `causalMask` 则是
+Decoder 和 Encoder 自注意力唯一的区别——遮住未来位置，逼着模型只能看"已经生成的
+部分"；`crossMha` 的 `xQ` 来自 Decoder、`xKV` 来自 `encoderOutput`，就是 §3.5 里
+"Encoder 和 Decoder 之间唯一的信息通道"在代码里的样子。完整可运行版本（含
+`main` 里三个演示：复现 §7 手算数字、可视化 causal mask 效果、跑一次完整
+Encoder-Decoder 前向传播）见同目录下的 `Transformer.java`；对应的 Python/numpy
+实现见 `Transformer.py`。
+
+### 10.1 运行结果示例
+
+执行 `Transformer.java` 里的 `main` 方法（`javac Transformer.java && java
+deepblue.inaction_01_hello_agents.chapter_03.Transformer`），实际输出如下：
+
+```text
+=== §7 手算例子对照（期望 output1≈[0.599,0.802]，output2≈[0.802,0.599]，output3≈[0.752,0.752]）===
+token 1 输出: [0.599, 0.802]
+token 2 输出: [0.802, 0.599]
+token 3 输出: [0.752, 0.752]
+
+=== §3.4 Masked Self-Attention：加 mask 前后对比 ===
+不加 mask（Encoder 用）：
+[0.868, 0.047, 0.071, 0.015]
+[0.031, 0.244, 0.393, 0.332]
+[0.022, 0.185, 0.637, 0.155]
+[0.006, 0.201, 0.200, 0.593]
+加 causal mask 后（Decoder 用，右上角应全为 0）：
+[1.000, 0.000, 0.000, 0.000]
+[0.114, 0.886, 0.000, 0.000]
+[0.026, 0.220, 0.754, 0.000]
+[0.006, 0.201, 0.200, 0.593]
+
+=== 完整 Encoder-Decoder 前向传播 ===
+源序列长度: 5 -> 目标序列长度: 4
+输出形状: [4, 60]（每个目标位置一个长度为 60 的概率分布）
+该位置概率和: 1.000000
+该位置概率和: 1.000000
+该位置概率和: 1.000000
+该位置概率和: 1.000000
+贪心解码得到的下一个 token id: 31 12 27 50
+```
+
+三段输出对应三个验证点：
+
+1. **§7 手算对照**：单头 Attention 在人工设定的权重（`W_Q=W_K=I`，`W_V` 交换两
+   维）下算出的三个输出向量，和 §7 手推的数字完全一致，验证 `scaledDotProduct
+   Attention` 实现无误。
+2. **causal mask 效果**：加 mask 前，第 1 个位置也能看到第 2、3、4 个位置（一整
+   行权重都非零）；加 mask 后，矩阵变成下三角——第 1 行只能看自己（权重全落在
+   对角线），第 4 行能看全部 4 个位置且和加 mask 前完全一样（本来就看得到全部历
+   史，不受影响），右上角强制为 0，直观验证了"Decoder 看不到未来"。
+3. **完整前向传播**：5 个 token 的源序列、4 个 token 的目标序列跑完 Embedding →
+   Encoder → Decoder（含 Masked Self-Attention 和 Cross-Attention）→ 输出层，得
+   到 `[4, 60]` 的概率矩阵，每一行概率和都是 `1.0`（softmax 归一化正确），最后
+   贪心解码（对每行取 `argmax`）得到 4 个 token id。因为模型参数是随机初始化、
+   未经训练的，这里的具体 token id 没有语义意义，它验证的是**形状和数值在整条
+   Encoder-Decoder 链路里能正确流转**——从 embedding 到最终概率分布，每一步的
+   矩阵维度都对得上。
