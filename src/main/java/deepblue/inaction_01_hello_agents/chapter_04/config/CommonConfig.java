@@ -15,7 +15,7 @@ public class CommonConfig {
     @Value("${openai.base-url:}")
     private String baseUrl;
 
-    @Value("${openai.model:qwen2.5:7b}")
+    @Value("${openai.model:}")
     private String model;
 
 }
