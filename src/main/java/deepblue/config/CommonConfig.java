@@ -1,0 +1,21 @@
+package deepblue.config;
+
+
+import lombok.Data;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+@Data
+public class CommonConfig {
+
+    @Value("${openai.api-key:}")
+    private String apiKey;
+
+    @Value("${openai.base-url:}")
+    private String baseUrl;
+
+    @Value("${openai.model:qwen2.5:7b}")
+    private String model;
+
+}
