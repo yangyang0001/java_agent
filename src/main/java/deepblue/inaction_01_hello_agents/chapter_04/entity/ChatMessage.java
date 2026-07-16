@@ -1,4 +1,4 @@
-package deepblue.entity;
+package deepblue.inaction_01_hello_agents.chapter_04.entity;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;

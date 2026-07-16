@@ -1,11 +1,11 @@
-package deepblue.controller;
+package deepblue.inaction_01_hello_agents.chapter_04.controller;
 
 import com.alibaba.fastjson.JSON;
 import com.openai.client.OpenAIClient;
 import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
-import deepblue.config.CommonConfig;
-import deepblue.entity.ChatMessage;
+import deepblue.inaction_01_hello_agents.chapter_04.config.CommonConfig;
+import deepblue.inaction_01_hello_agents.chapter_04.entity.ChatMessage;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;

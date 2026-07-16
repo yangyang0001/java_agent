@@ -1,4 +1,4 @@
-package deepblue.config;
+package deepblue.inaction_01_hello_agents.chapter_04.config;
 
 
 import lombok.Data;
