@@ -15,7 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 // 统一消息路由的 WebSocket 处理器：客户端在消息里带上 mode 字段，
 // 服务器据此决定这条消息该发给谁，演示 ECHO / PROCESS / UNICAST / BROADCAST 四种路由策略
 @Component
-public class EchoWebSocketHandler extends TextWebSocketHandler {
+public class MultiModeWebSocketHandler extends TextWebSocketHandler {
 
     // 按 sessionId 索引在线连接，UNICAST 需要按 id 精确查找目标会话
     private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();

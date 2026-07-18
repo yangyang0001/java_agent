@@ -22,7 +22,7 @@ Sec-WebSocket-Version: 13
 
 ## 2. 本项目实现的四种通信方式
 
-同一个 `EchoWebSocketHandler` 注册在 4 个不同 URI 上，每个 URI 对应一种默认路由模式（`WebsocketMode` 枚举）：
+同一个 `MultiModeWebSocketHandler` 注册在 4 个不同 URI 上，每个 URI 对应一种默认路由模式（`WebsocketMode` 枚举）：
 
 | URI | mode | 服务器行为 | 类比 |
 |---|---|---|---|
@@ -33,15 +33,15 @@ Sec-WebSocket-Version: 13
 
 四种模式共用同一份在线连接表（`Map<sessionId, WebSocketSession>`），不管客户端从哪个 URI 连进来都在同一个池子里，所以 BROADCAST/UNICAST 能触达任意端点连进来的客户端。
 
-服务器怎么知道用哪个 mode：`EchoWebSocketHandler.resolveMode()` 优先看消息体里有没有显式的 `mode` 字段，没有就取 `session.getUri()` 的最后一段路径去匹配 `WebsocketMode` 枚举——连哪个 URI 默认就是哪种模式，不用每条消息都带 `mode` 字段（但仍然支持显式指定，会优先生效）。
+服务器怎么知道用哪个 mode：`MultiModeWebSocketHandler.resolveMode()` 优先看消息体里有没有显式的 `mode` 字段，没有就取 `session.getUri()` 的最后一段路径去匹配 `WebsocketMode` 枚举——连哪个 URI 默认就是哪种模式，不用每条消息都带 `mode` 字段（但仍然支持显式指定，会优先生效）。
 
 代码分布：
 
-- `config/WebSocketConfig.java`：把 `EchoWebSocketHandler` 同时绑定到 4 个路径上
+- `config/WebSocketConfig.java`：把 `MultiModeWebSocketHandler` 同时绑定到 4 个路径上
 - `config/WebSocketPortConfig.java`：给 WebSocket 额外开一个 `8888` 端口（HTTP 接口仍是 `8080`）
 - `common/WebsocketMode.java`：`ECHO`/`PROCESS`/`UNICAST`/`BROADCAST` 四个枚举值
 - `common/WebsocketMsg.java`：统一消息格式，字段 `mode`（可选）、`from`（服务端自动填充）、`to`（仅 UNICAST 用）、`content`
-- `EchoWebSocketHandler.java`：`afterConnectionEstablished` 记录在线连接并广播上线通知；`handleTextMessage` 解析消息、推断 mode、分发到四个私有方法；`afterConnectionClosed` 移除连接并广播下线通知
+- `MultiModeWebSocketHandler.java`：`afterConnectionEstablished` 记录在线连接并广播上线通知；`handleTextMessage` 解析消息、推断 mode、分发到四个私有方法；`afterConnectionClosed` 移除连接并广播下线通知
 - `client/` 目录：四个各自连独立 URI 的 Java 客户端（`EchoClient`/`ProcessClient`/`BroadcastClient`/`UnicastClient`），直接在 IDEA 里跑 `main` 方法即可，不用手动设置 `mode`
 
 ## 3. 怎么测试这四种通信方式
