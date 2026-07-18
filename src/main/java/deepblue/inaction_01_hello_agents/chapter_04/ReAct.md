@@ -121,3 +121,17 @@ Action: Search[...] | Finish[...]
 - `ToolExecutor` 是两套实现共用的工具注册表(`SearchController` 也复用它做单独的
   Action → Observation 验证)，新增工具只需调用 `registerTool(name, description, func)`，
   两条 ReAct 路径都能立刻用上。
+
+## 6. 三种范式对比
+
+| 维度 | ReAct | Plan-and-Solve | Reflection |
+|---|---|---|---|
+| 核心循环 | Thought → Action → Observation，边想边做 | Plan(一次性规划) → Solve(逐步执行) | Execution → Reflection → Refinement，事后自我校正 |
+| 纠错来源 | 外部工具返回的 Observation | 无——规划错了就一路错到底 | 模型自己扮演"评审员"，不依赖外部工具 |
+| 是否有全局规划 | 无，走一步看一步 | 有，一次性生成完整步骤列表 | 无任务分解，针对已有产物做整体审查 |
+| 典型模型调用次数 | 每步 1 次，共 O(步数) 次 | 1 次规划 + N 次执行(N=步骤数) | 1 次初稿 + 2×实际迭代轮数 次(反思+优化) |
+| 延迟/成本 | 中等，随步数增长 | 中等，步骤数固定后基本可预估 | 三者中最高，严格串行且每轮至少两次调用 |
+| 主要局限 | 提示词脆弱、可能原地打转、强依赖格式遵循能力 | 规划错误无法自愈、不适合探索型任务 | 调用开销大、延迟高、提示工程复杂度高、收敛性无保证 |
+| 本项目实现 | `ChatController`(function-calling) / `ReActAgent`(经典提示词) | `Planner` + `Executor` + `PlanAndSolveAgent` | `Memory` + `ReflectionAgent` |
+| 独立入口 | `/chat`、`/react` | `/plan-and-solve` | `/reflection` |
+| 最适合的场景 | 需要外部知识/实时信息的任务(搜索、查数据) | 结构清晰、可预先完整拆解的任务(应用题、报告结构) | 对质量/可靠性要求高、可接受高延迟的任务(关键代码、深度分析) |
