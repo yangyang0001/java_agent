@@ -9,6 +9,7 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
+import java.net.URI;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -34,15 +35,17 @@ public class SerpApiSearchTool {
                 return "错误:SERPAPI_API_KEY 未在配置中设置。";
             }
 
-            String url = UriComponentsBuilder.fromHttpUrl(SERPAPI_ENDPOINT)
+            URI uri = UriComponentsBuilder.fromHttpUrl(SERPAPI_ENDPOINT)
                     .queryParam("engine", "google")
                     .queryParam("q", query)
                     .queryParam("api_key", commonConfig.getSerpApiKey())
                     .queryParam("gl", "cn") // 国家代码
                     .queryParam("hl", "zh-cn") // 语言代码
-                    .toUriString();
+                    .build()
+                    .encode()
+                    .toUri();
 
-            String response = restTemplate.getForObject(url, String.class);
+            String response = restTemplate.getForObject(uri, String.class);
             JSONObject results = JSONObject.parseObject(response);
 
             // 智能解析:优先寻找最直接的答案
