@@ -18,4 +18,7 @@ public class CommonConfig {
     @Value("${openai.model:}")
     private String model;
 
+    @Value("${serpapi.api-key:f9c09a5d868eedd5b9d2f280c03a331adc9911996a63ce283b9075bd15524842}")
+    private String serpApiKey;
+
 }
