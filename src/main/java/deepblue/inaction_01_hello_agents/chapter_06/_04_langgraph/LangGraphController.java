@@ -1,4 +1,4 @@
-package deepblue.inaction_01_hello_agents.chapter_06.langgraph;
+package deepblue.inaction_01_hello_agents.chapter_06._04_langgraph;
 
 import jakarta.annotation.Resource;
 import org.springframework.web.bind.annotation.PostMapping;

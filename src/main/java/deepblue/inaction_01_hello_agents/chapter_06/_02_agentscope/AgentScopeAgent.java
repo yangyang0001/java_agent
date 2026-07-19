@@ -1,4 +1,4 @@
-package deepblue.inaction_01_hello_agents.chapter_06.agentscope;
+package deepblue.inaction_01_hello_agents.chapter_06._02_agentscope;
 
 import com.openai.client.OpenAIClient;
 import com.openai.models.chat.completions.ChatCompletion;

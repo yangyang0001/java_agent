@@ -1,4 +1,4 @@
-package deepblue.inaction_01_hello_agents.chapter_06.autogen;
+package deepblue.inaction_01_hello_agents.chapter_06._02_agentscope;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -7,9 +7,9 @@ import lombok.NoArgsConstructor;
 @Data
 @AllArgsConstructor
 @NoArgsConstructor
-public class GroupChatMessage {
+public class PlayerMessage {
 
-    private String role;
+    private String player;
 
     private String content;
 }

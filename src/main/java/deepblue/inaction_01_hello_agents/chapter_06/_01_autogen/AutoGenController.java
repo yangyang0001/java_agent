@@ -1,4 +1,4 @@
-package deepblue.inaction_01_hello_agents.chapter_06.autogen;
+package deepblue.inaction_01_hello_agents.chapter_06._01_autogen;
 
 import jakarta.annotation.Resource;
 import org.springframework.web.bind.annotation.PostMapping;
