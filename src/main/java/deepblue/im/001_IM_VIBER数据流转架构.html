@@ -7,8 +7,8 @@
   body { font-family: -apple-system, "PingFang SC", sans-serif; max-width: 1100px; margin: 40px auto; padding: 0 20px; }
   h2 { border-bottom: 1px solid #ddd; padding-bottom: 8px; }
   .diagram { overflow-x: auto; margin-bottom: 60px; border: 1px solid #eee; border-radius: 8px; padding: 16px; }
-  .diagram svg { min-width: 1200px; height: auto; }
-  .diagram-xl svg { min-width: 2000px; }
+  .diagram svg { max-width: 100%; height: auto; }
+  .diagram-xl svg { max-width: 100%; }
   .legend { display: flex; gap: 24px; align-items: center; margin: 12px 0 32px; font-size: 14px; }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
@@ -80,7 +80,6 @@ sequenceDiagram
 <h2>3. 整体系统架构（Bot + Business Messages 并存场景）</h2>
 <div class="diagram diagram-xl">
 <pre class="mermaid">
-%%{init: {'themeVariables': {'fontSize': '24px'}}}%%
 sequenceDiagram
     actor U1 as 📱 已关注用户
     participant BotAPI as 🤖 Bot API
