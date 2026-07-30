@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>001_IM_VIBER 数据流转架构</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; max-width: 1100px; margin: 40px auto; padding: 0 20px; }
+  h2 { border-bottom: 1px solid #ddd; padding-bottom: 8px; }
+  .diagram { overflow-x: auto; margin-bottom: 60px; border: 1px solid #eee; border-radius: 8px; padding: 16px; }
+  .diagram svg { min-width: 1200px; height: auto; }
+  .diagram-xl svg { min-width: 2000px; }
+  .legend { display: flex; gap: 24px; align-items: center; margin: 12px 0 32px; font-size: 14px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+</style>
+</head>
+<body>
+<h1>001_IM_VIBER.md 数据流转架构</h1>
+<div class="legend">
+  <span><span class="swatch" style="background:rgb(255,214,214)"></span>红色 = Viber/BSP 主动调用我的 Webhook</span>
+  <span><span class="swatch" style="background:rgb(207,226,255)"></span>蓝色 = 服务主动调用 Viber 接口</span>
+</div>
+
+<h2>1. Viber Bot API（双向对话）数据流</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    actor U as 📱 用户(Viber App)
+    participant VC as ☁️ Viber 云端服务器
+    participant WH as 🔔 social-sop-api服务
+    participant Gateway as 🚦 chat-bot-api 网关服务
+    participant BIZ as ⚙️ sobot服务
+    participant DB as 🗄️ 数据库/CRM
+
+    U->>VC: 发送消息/关注/点击按钮【App内部能力，无接口】
+    rect rgb(255, 214, 214)
+    VC->>WH: POST 回调事件 message/subscribed/delivered...【Viber主动调你的Webhook】
+    end
+    WH->>Gateway: 转发【你自己系统内部调用】
+    Gateway->>BIZ: 路由【你自己系统内部调用】
+    BIZ->>DB: 查询/更新用户会话状态、订单等【你自己系统内部调用】
+    DB-->>BIZ: 返回业务数据【你自己系统内部调用】
+    BIZ-->>WH: 生成回复内容【你自己系统内部调用】
+    rect rgb(207, 226, 255)
+    WH->>VC: 调用 send_message API 发送回复【✅你调用Viber公开API】
+    end
+    VC->>U: 推送消息到用户 Viber 客户端【Viber内部推送能力，无接口】
+    rect rgb(255, 214, 214)
+    VC-->>WH: 异步回调 delivered/seen 状态【Viber主动调你的Webhook】
+    end
+</pre>
+</div>
+
+<h2>2. Business Messages（企业主动触达）数据流</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    participant A as 🏢 social-sop-api服务
+    participant B as 🔗 BSP（Business Solution Provider）
+    participant C as ☁️ Viber Business Messages 网关
+    actor D as 📱 目标用户 Viber App
+    participant E as 🗄️ 消息状态落库
+
+    A->>B: 调用发送API（Transactional/Promotional）【你调用BSP的API，非Viber接口】
+    rect rgb(207, 226, 255)
+    B->>C: 鉴权/路由/计费【✅BSP调用Viber Business Messages接口】
+    end
+    C->>D: 下发消息（无需用户提前关注）【Viber内部推送能力，无接口】
+    D-->>C: 送达/已读/拒收回执【App/Viber内部能力，无接口】
+    rect rgb(255, 214, 214)
+    C-->>B: 状态回调【Viber主动调BSP】
+    end
+    rect rgb(255, 214, 214)
+    B-->>A: DLR 回调送达状态【BSP主动调你的DLR回调状态接口】
+    end
+    A->>E: 写入落库（用于对账/重试）【你自己系统内部调用】
+</pre>
+</div>
+
+<h2>3. 整体系统架构（Bot + Business Messages 并存场景）</h2>
+<div class="diagram diagram-xl">
+<pre class="mermaid">
+%%{init: {'themeVariables': {'fontSize': '24px'}}}%%
+sequenceDiagram
+    actor U1 as 📱 已关注用户
+    participant BotAPI as 🤖 Bot API
+    participant WH as 🔔 social-sop-api服务
+    participant Gateway as 🚦 chat-bot-api 网关服务
+    participant Logic as ⚙️ sobot服务
+    participant DB as 🗄️ 会话&状态数据库
+    participant Queue as 📨 消息队列
+    participant BSP as 🔗 BSP（Business Solution Provider）认证服务商
+    participant BizGW as ☁️ Business Messages 网关
+    actor U2 as 📱 未关注/仅有手机号的用户
+
+    U1<<->>BotAPI: 双向对话【App/Viber内部能力，无接口】
+    rect rgb(255, 214, 214)
+    BotAPI->>WH: Webhook 回调【Viber主动调你的Webhook】
+    end
+    WH->>Gateway: 转发【你自己系统内部调用】
+    Gateway->>Logic: 路由【你自己系统内部调用】
+    Logic->>DB: 查询/更新会话状态【你自己系统内部调用】
+    DB-->>Logic: 返回业务数据【你自己系统内部调用】
+    Logic-->>WH: 生成回复内容【你自己系统内部调用】
+    rect rgb(207, 226, 255)
+    WH->>BotAPI: 调用 send_message API【✅你调用Viber公开API】
+    end
+    BotAPI->>U1: 推送消息【Viber内部推送能力，无接口】
+
+    Note over Logic,Queue: 主动通知类走另一条路径
+    Logic->>Queue: 主动通知类【你自己系统内部调用】
+    Queue->>BSP: 转发【你调用BSP的API，非Viber接口】
+    rect rgb(207, 226, 255)
+    BSP->>BizGW: 鉴权/路由【✅BSP调用Viber Business Messages接口】
+    end
+    BizGW->>U2: 单向/首发消息（无需订阅）【Viber内部推送能力，无接口】
+    U2-->>BizGW: 送达回执【App/Viber内部能力，无接口】
+    rect rgb(255, 214, 214)
+    BizGW-->>BSP: 回执【Viber主动调BSP】
+    end
+    rect rgb(255, 214, 214)
+    BSP-->>Gateway: 状态回调【BSP主动调你的网关/Webhook】
+    end
+</pre>
+</div>
+
+<h2>4. Business Messages 完整生命周期（首次下发 + 双向会话）数据流</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    actor D as 📱 用户 Viber App
+    participant C as ☁️ Viber Business Messages 网关
+    participant B as 🔗 BSP（Business Solution Provider）
+    participant WH as 🔔 social-sop-api服务
+    participant Gateway as 🚦 chat-bot-api 网关服务
+    participant Logic as ⚙️ sobot服务
+    participant DB as 🗄️ 会话&状态数据库
+
+    Note over WH,D: 阶段一：企业首次下发 Business Message
+    WH->>B: 调用发送API（Transactional/Promotional）【你调用BSP的API，非Viber接口】
+    rect rgb(207, 226, 255)
+    B->>C: 鉴权/路由/计费【✅BSP调用Viber Business Messages接口】
+    end
+    C->>D: 下发消息（无需用户提前关注）【Viber内部推送能力，无接口】
+    D-->>C: 送达/已读/拒收回执【App/Viber内部能力，无接口】
+    rect rgb(255, 214, 214)
+    C-->>B: 状态回调【Viber主动调BSP】
+    end
+    rect rgb(255, 214, 214)
+    B-->>WH: DLR 回调送达状态【BSP主动调你的DLR回调状态接口】
+    end
+
+    Note over D,WH: 阶段二：用户回复 → 开启双向会话（Business Inbox）
+    D->>C: 用户回复客服【App/Viber内部能力，无接口】
+    rect rgb(255, 214, 214)
+    C->>B: 转发用户回复【Viber主动调BSP】
+    end
+    rect rgb(255, 214, 214)
+    B->>WH: Webhook 回调用户回复【BSP主动调你的Webhook】
+    end
+    WH->>Gateway: 转发【你自己系统内部调用】
+    Gateway->>Logic: 路由【你自己系统内部调用】
+    Logic->>DB: 标记该用户为默认已订阅【你自己系统内部调用】
+    Note over Logic,DB: 内部视为默认订阅，发送仍走 Business Messages 通道
+    Logic-->>WH: 生成回复内容【你自己系统内部调用】
+    WH->>B: 调用发送API 回复用户【你调用BSP的API，非Viber接口】
+    rect rgb(207, 226, 255)
+    B->>C: 鉴权/路由/计费【✅BSP调用Viber Business Messages接口】
+    end
+    C->>D: 下发回复消息【Viber内部推送能力，无接口】
+</pre>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: "default", themeVariables: { fontSize: "20px" } });</script>
+</body>
+</html>

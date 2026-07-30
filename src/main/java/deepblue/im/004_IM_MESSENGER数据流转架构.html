@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>004_IM_MESSENGER 数据流转架构</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; max-width: 1100px; margin: 40px auto; padding: 0 20px; }
+  h2 { border-bottom: 1px solid #ddd; padding-bottom: 8px; }
+  .diagram { overflow-x: auto; margin-bottom: 60px; border: 1px solid #eee; border-radius: 8px; padding: 16px; }
+  .diagram svg { min-width: 1200px; height: auto; }
+  .diagram-xl svg { min-width: 2000px; }
+  .legend { display: flex; gap: 24px; align-items: center; margin: 12px 0 32px; font-size: 14px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+</style>
+</head>
+<body>
+<h1>004_IM_MESSENGER.md 数据流转架构</h1>
+<div class="legend">
+  <span><span class="swatch" style="background:rgb(255,214,214)"></span>红色 = Messenger 主动调用我的 Webhook</span>
+  <span><span class="swatch" style="background:rgb(207,226,255)"></span>蓝色 = 服务主动调用 Messenger 接口</span>
+</div>
+
+<h2>1. 24 小时窗口内双向对话数据流</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    actor U as 📱 用户(Messenger App)
+    participant VC as ☁️ Messenger 云端服务器
+    participant WH as 🔔 social-sop-api服务
+    participant Gateway as 🚦 chat-bot-api 网关服务
+    participant BIZ as ⚙️ sobot服务
+    participant DB as 🗄️ 数据库/CRM
+
+    U->>VC: 发送消息/点击入口获取PSID【App/Messenger内部能力，无接口】
+    rect rgb(255, 214, 214)
+    VC->>WH: POST Webhook 消息事件【Messenger主动调你的Webhook】
+    end
+    WH->>Gateway: 转发【你自己系统内部调用】
+    Gateway->>BIZ: 路由【你自己系统内部调用】
+    BIZ->>DB: 查询/更新用户会话状态【你自己系统内部调用】
+    DB-->>BIZ: 返回业务数据【你自己系统内部调用】
+    BIZ-->>WH: 生成回复内容【你自己系统内部调用】
+    rect rgb(207, 226, 255)
+    WH->>VC: 调用 Send API（messaging_type=RESPONSE）【✅你调用Messenger公开API】
+    end
+    VC->>U: 推送消息到用户 Messenger 客户端【Messenger内部推送能力，无接口】
+    rect rgb(255, 214, 214)
+    VC-->>WH: 异步回调 delivered/read 状态【Messenger主动调你的Webhook】
+    end
+</pre>
+</div>
+
+<h2>2. Message Tag（窗口外特定场景消息）数据流</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    participant A as 🏢 social-sop-api服务
+    participant VC as ☁️ Messenger 云端服务器
+    actor D as 📱 目标用户 Messenger App
+    participant E as 🗄️ 消息状态落库
+
+    rect rgb(207, 226, 255)
+    A->>VC: 调用Send API + messaging_type=MESSAGE_TAG（需已有PSID+符合标签类别）【✅你调用Messenger公开API】
+    end
+    VC->>D: 下发标签消息（仅限已互动过、已有PSID的用户）【Messenger内部推送能力，无接口】
+    D-->>VC: 送达/已读回执【App/Messenger内部能力，无接口】
+    rect rgb(255, 214, 214)
+    VC-->>A: Webhook 回调送达状态【Messenger主动调你的Webhook】
+    end
+    A->>E: 写入落库（用于对账/重试）【你自己系统内部调用】
+</pre>
+</div>
+
+<h2>3. 整体系统架构（窗口内 + Message Tag 并存场景）</h2>
+<div class="diagram diagram-xl">
+<pre class="mermaid">
+%%{init: {'themeVariables': {'fontSize': '24px'}}}%%
+sequenceDiagram
+    actor U1 as 📱 已互动用户(有PSID)
+    participant VC as ☁️ Messenger 云端服务器
+    participant WH as 🔔 social-sop-api服务
+    participant Gateway as 🚦 chat-bot-api 网关服务
+    participant Logic as ⚙️ sobot服务
+    participant DB as 🗄️ 会话&状态数据库
+    participant Queue as 📨 消息队列
+
+    U1<<->>VC: 窗口内双向对话【App/Messenger内部能力，无接口】
+    rect rgb(255, 214, 214)
+    VC->>WH: Webhook 回调【Messenger主动调你的Webhook】
+    end
+    WH->>Gateway: 转发【你自己系统内部调用】
+    Gateway->>Logic: 路由【你自己系统内部调用】
+    Logic->>DB: 查询/更新会话状态【你自己系统内部调用】
+    DB-->>Logic: 返回业务数据【你自己系统内部调用】
+    Logic-->>WH: 生成回复内容【你自己系统内部调用】
+    rect rgb(207, 226, 255)
+    WH->>VC: 调用 Send API（RESPONSE）【✅你调用Messenger公开API】
+    end
+    VC->>U1: 推送消息【Messenger内部推送能力，无接口】
+
+    Note over Logic,Queue: 窗口外事务性通知走 Message Tag 路径
+    Logic->>Queue: 生成Message Tag通知任务【你自己系统内部调用】
+    Queue->>WH: 出队触发发送【你自己系统内部调用】
+    rect rgb(207, 226, 255)
+    WH->>VC: 调用Send API + Message Tag（窗口外）【✅你调用Messenger公开API】
+    end
+    VC->>U1: 下发标签消息（仅限已有PSID用户）【Messenger内部推送能力，无接口】
+    rect rgb(255, 214, 214)
+    VC-->>WH: 送达状态回调【Messenger主动调你的Webhook】
+    end
+    WH->>Gateway: 转发【你自己系统内部调用】
+    Gateway->>Logic: 路由【你自己系统内部调用】
+    Logic->>DB: 更新送达状态【你自己系统内部调用】
+</pre>
+</div>
+
+<h2>4. Messenger 完整生命周期（Message Tag 触达 + 窗口重开）数据流</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    actor D as 📱 用户 Messenger App
+    participant VC as ☁️ Messenger 云端服务器
+    participant WH as 🔔 social-sop-api服务
+    participant Gateway as 🚦 chat-bot-api 网关服务
+    participant Logic as ⚙️ sobot服务
+    participant DB as 🗄️ 会话&状态数据库
+
+    Note over WH,D: 阶段一：企业通过 Message Tag 在窗口外触达用户
+    rect rgb(207, 226, 255)
+    WH->>VC: 调用Send API + Message Tag【✅你调用Messenger公开API】
+    end
+    VC->>D: 下发标签消息【Messenger内部推送能力，无接口】
+    D-->>VC: 送达回执【App/Messenger内部能力，无接口】
+    rect rgb(255, 214, 214)
+    VC-->>WH: Webhook 回调送达状态【Messenger主动调你的Webhook】
+    end
+
+    Note over D,WH: 阶段二：用户回复 → 24小时标准消息窗口重新开启
+    D->>VC: 用户回复【App/Messenger内部能力，无接口】
+    rect rgb(255, 214, 214)
+    VC->>WH: Webhook 回调用户消息【Messenger主动调你的Webhook】
+    end
+    WH->>Gateway: 转发【你自己系统内部调用】
+    Gateway->>Logic: 路由【你自己系统内部调用】
+    Logic->>DB: 记录窗口重新开启时间【你自己系统内部调用】
+    Logic-->>WH: 生成回复内容【你自己系统内部调用】
+    rect rgb(207, 226, 255)
+    WH->>VC: 调用Send API（RESPONSE，窗口内自由消息）【✅你调用Messenger公开API】
+    end
+    VC->>D: 下发回复消息【Messenger内部推送能力，无接口】
+</pre>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: "default", themeVariables: { fontSize: "20px" } });</script>
+</body>
+</html>

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>003_IM_TELEGRAM 数据流转架构</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; max-width: 1100px; margin: 40px auto; padding: 0 20px; }
+  h2 { border-bottom: 1px solid #ddd; padding-bottom: 8px; }
+  .diagram { overflow-x: auto; margin-bottom: 60px; border: 1px solid #eee; border-radius: 8px; padding: 16px; }
+  .diagram svg { min-width: 1200px; height: auto; }
+  .diagram-xl svg { min-width: 2000px; }
+  .legend { display: flex; gap: 24px; align-items: center; margin: 12px 0 32px; font-size: 14px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+</style>
+</head>
+<body>
+<h1>003_IM_TELEGRAM.md 数据流转架构</h1>
+<div class="legend">
+  <span><span class="swatch" style="background:rgb(255,214,214)"></span>红色 = Telegram 主动调用我的 Webhook</span>
+  <span><span class="swatch" style="background:rgb(207,226,255)"></span>蓝色 = 服务主动调用 Telegram 接口</span>
+</div>
+
+<h2>1. Telegram Bot API（双向对话）数据流</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    actor U as 📱 用户(Telegram App)
+    participant TG as ☁️ Telegram Bot API 服务器
+    participant WH as 🔔 social-sop-api服务
+    participant Gateway as 🚦 chat-bot-api 网关服务
+    participant BIZ as ⚙️ sobot服务
+    participant DB as 🗄️ 数据库/CRM
+
+    U->>TG: 发送 /start 或消息【App/Telegram内部能力，无接口】
+    rect rgb(255, 214, 214)
+    TG->>WH: POST Update 事件（message等）【Telegram主动调你的Webhook】
+    end
+    WH->>Gateway: 转发【你自己系统内部调用】
+    Gateway->>BIZ: 路由【你自己系统内部调用】
+    BIZ->>DB: 查询/更新用户会话状态【你自己系统内部调用】
+    DB-->>BIZ: 返回业务数据【你自己系统内部调用】
+    BIZ-->>WH: 生成回复内容【你自己系统内部调用】
+    rect rgb(207, 226, 255)
+    WH->>TG: 调用 sendMessage API【✅你调用Telegram公开API】
+    end
+    TG->>U: 推送消息到用户 Telegram 客户端【App/Telegram内部能力，无接口】
+</pre>
+</div>
+
+<h2>2. 广播已互动用户数据流</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    participant BIZ as ⚙️ sobot服务
+    participant DB as 🗄️ 数据库/CRM
+    participant WH as 🔔 social-sop-api服务
+    participant TG as ☁️ Telegram Bot API 服务器
+    actor U as 📱 已互动用户(chat_id 列表)
+
+    BIZ->>DB: 查询已互动用户 chat_id 列表【你自己系统内部调用】
+    DB-->>BIZ: 返回 chat_id 列表【你自己系统内部调用】
+    BIZ->>WH: 生成广播内容【你自己系统内部调用】
+    loop 遍历 chat_id 列表（按限速节流）
+    rect rgb(207, 226, 255)
+    WH->>TG: 调用 sendMessage API【✅你调用Telegram公开API】
+    end
+    TG->>U: 推送消息【App/Telegram内部能力，无接口】
+    end
+</pre>
+</div>
+
+<h2>3. 整体系统架构（双向对话 + 广播 共用同一套后端）</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    actor U as 📱 已互动用户
+    participant TG as ☁️ Telegram Bot API 服务器
+    participant WH as 🔔 social-sop-api服务
+    participant Gateway as 🚦 chat-bot-api 网关服务
+    participant Logic as ⚙️ sobot服务
+    participant DB as 🗄️ 数据库/CRM
+
+    U->>TG: 发送 /start 或消息【App/Telegram内部能力，无接口】
+    rect rgb(255, 214, 214)
+    TG->>WH: POST Update 事件【Telegram主动调你的Webhook】
+    end
+    WH->>Gateway: 转发【你自己系统内部调用】
+    Gateway->>Logic: 路由【你自己系统内部调用】
+    Logic->>DB: 查询/更新会话状态【你自己系统内部调用】
+    DB-->>Logic: 返回业务数据【你自己系统内部调用】
+    Logic-->>WH: 生成回复内容【你自己系统内部调用】
+    rect rgb(207, 226, 255)
+    WH->>TG: 调用 sendMessage API【✅你调用Telegram公开API】
+    end
+    TG->>U: 推送消息【App/Telegram内部能力，无接口】
+
+    Note over Logic,DB: 主动通知/广播类消息，只能对 DB 中已互动的 chat_id 发送，不是冷启动
+    Logic->>DB: 查询已互动 chat_id 列表【你自己系统内部调用】
+    DB-->>Logic: 返回列表【你自己系统内部调用】
+    Logic->>WH: 生成广播内容【你自己系统内部调用】
+    loop 遍历 chat_id 列表
+    rect rgb(207, 226, 255)
+    WH->>TG: 调用 sendMessage API【✅你调用Telegram公开API】
+    end
+    TG->>U: 推送广播消息【App/Telegram内部能力，无接口】
+    end
+</pre>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: "default", themeVariables: { fontSize: "20px" } });</script>
+</body>
+</html>
