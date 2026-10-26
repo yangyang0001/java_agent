@@ -7,26 +7,26 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 
 /** 消费入站请求，分别通过 ctx 和 channel 发起出站响应。 */
-public final class Business extends ChannelInboundHandlerAdapter {
+public final class InboundHandlerAdapterBusiness extends ChannelInboundHandlerAdapter {
 
     private final Mode mode;
 
-    public Business(Mode mode) {
+    public InboundHandlerAdapterBusiness(Mode mode) {
         this.mode = mode;
     }
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         // BP5：业务消费请求，不再 fireChannelRead，因此不会传到 Tail。
-        PipelineLogger.log("IN", ctx, msg);
+        PipelineLogger.log("IN", "channelRead", ctx, msg);
         String response = "reply:" + msg;
         ChannelFuture future;
         if (mode == Mode.CTX_WRITE) {
-            // BP6：从 Business 的前方查找 Outbound，跳过 InboundB。
-            // 路径：OutboundA；Business 后面的 OutboundB 不会执行。
+            // BP6：从 InboundHandlerAdapterBusiness 的前方查找 Outbound，跳过 InboundHandlerAdapterB。
+            // 路径：OutboundHandlerAdapterA；InboundHandlerAdapterBusiness 后面的 OutboundHandlerAdapterB 不会执行。
             future = ctx.writeAndFlush(response);
         } else {
-            // BP7：从 Tail 查找 Outbound，先执行 OutboundB，再执行 OutboundA。
+            // BP7：从 Tail 查找 Outbound，先执行 OutboundHandlerAdapterB，再执行 OutboundHandlerAdapterA。
             future = ctx.channel().writeAndFlush(response);
         }
         future.addListener(done -> {

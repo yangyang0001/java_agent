@@ -926,6 +926,258 @@ Netty:
 		    · Handler 默认不能被多个 Channel 共享; 无状态的才能加 @Sharable 做成单例,
 		      有状态的 (如 ByteToMessageDecoder 的子类) 每个连接 new 一个, 否则多个连接的数据串在一起。
 		    · exceptionCaught 要在最后一个 Handler 里处理 (记录日志 + ctx.close()), 否则异常传到 tail 只打一行 warn, 连接还挂着。
+		    · 17 种事件 (io.netty.channel.ChannelHandlerMask, netty-transport 包内私有类, 每种占 executionMask 的 1 位; Netty 4.1.113):
+		      源码位置: ChannelHandlerMask 常量 L39~55 / mask() L76 / mask0() L91 / @Skip L202;
+		               AbstractChannelHandlerContext 构造器 L109 算 executionMask / findContextInbound L1068 / skipContext L1086。
+		      列: bit=位  dec=十进制  hex=十六进制  binary=二进制  constant=常量  method=Handler 方法
+		      +-------+-------+---------+-----------------------+----------------------------------+---------------------------+------+------------------------------------------------------------------
+		      | bit   | dec   | hex     | binary (bit16~bit0)   | constant                         | method                    | 方向 | 含义 / 何时触发
+		      +=======+=======+=========+=======================+==================================+===========================+======+==================================================================
+		      | 1<<0  | 1     | 0x1     | 0 0000 0000 0000 0001 | MASK_EXCEPTION_CAUGHT            | exceptionCaught           | 双向 | Handler 抛异常, 沿入站方向传播
+		      | 1<<1  | 2     | 0x2     | 0 0000 0000 0000 0010 | MASK_CHANNEL_REGISTERED          | channelRegistered         | 入站 | Channel 注册到 EventLoop
+		      | 1<<2  | 4     | 0x4     | 0 0000 0000 0000 0100 | MASK_CHANNEL_UNREGISTERED        | channelUnregistered       | 入站 | Channel 从 EventLoop 注销
+		      | 1<<3  | 8     | 0x8     | 0 0000 0000 0000 1000 | MASK_CHANNEL_ACTIVE              | channelActive             | 入站 | 连接建立 (可读写)
+		      | 1<<4  | 16    | 0x10    | 0 0000 0000 0001 0000 | MASK_CHANNEL_INACTIVE            | channelInactive           | 入站 | 连接断开
+		      | 1<<5  | 32    | 0x20    | 0 0000 0000 0010 0000 | MASK_CHANNEL_READ                | channelRead               | 入站 | 读到一条消息
+		      | 1<<6  | 64    | 0x40    | 0 0000 0000 0100 0000 | MASK_CHANNEL_READ_COMPLETE       | channelReadComplete       | 入站 | 本轮读取结束 (适合在这里 flush)
+		      | 1<<7  | 128   | 0x80    | 0 0000 0000 1000 0000 | MASK_USER_EVENT_TRIGGERED        | userEventTriggered        | 入站 | 自定义事件, 如 IdleStateEvent 心跳超时
+		      | 1<<8  | 256   | 0x100   | 0 0000 0001 0000 0000 | MASK_CHANNEL_WRITABILITY_CHANGED | channelWritabilityChanged | 入站 | 越过高 / 低水位, isWritable 变化
+		      | 1<<9  | 512   | 0x200   | 0 0000 0010 0000 0000 | MASK_BIND                        | bind                      | 出站 | 绑定本地端口
+		      | 1<<10 | 1024  | 0x400   | 0 0000 0100 0000 0000 | MASK_CONNECT                     | connect                   | 出站 | 发起连接
+		      | 1<<11 | 2048  | 0x800   | 0 0000 1000 0000 0000 | MASK_DISCONNECT                  | disconnect                | 出站 | 断开连接
+		      | 1<<12 | 4096  | 0x1000  | 0 0001 0000 0000 0000 | MASK_CLOSE                       | close                     | 出站 | 关闭 Channel
+		      | 1<<13 | 8192  | 0x2000  | 0 0010 0000 0000 0000 | MASK_DEREGISTER                  | deregister                | 出站 | 从 EventLoop 注销
+		      | 1<<14 | 16384 | 0x4000  | 0 0100 0000 0000 0000 | MASK_READ                        | read                      | 出站 | 请求从 socket 读数据 (autoRead / ctx.read 触发, 不是 channelRead)
+		      | 1<<15 | 32768 | 0x8000  | 0 1000 0000 0000 0000 | MASK_WRITE                       | write                     | 出站 | 写入 ChannelOutboundBuffer, 还没发出去
+		      | 1<<16 | 65536 | 0x10000 | 1 0000 0000 0000 0000 | MASK_FLUSH                       | flush                     | 出站 | 把缓冲区数据真正写到 socket
+		      +-------+-------+---------+-----------------------+----------------------------------+---------------------------+------+------------------------------------------------------------------
+
+		      源码 (ChannelHandlerMask L57~63):
+		          static final int MASK_ONLY_INBOUND =  MASK_CHANNEL_REGISTERED |
+		                  MASK_CHANNEL_UNREGISTERED | MASK_CHANNEL_ACTIVE | MASK_CHANNEL_INACTIVE | MASK_CHANNEL_READ |
+		                  MASK_CHANNEL_READ_COMPLETE | MASK_USER_EVENT_TRIGGERED | MASK_CHANNEL_WRITABILITY_CHANGED;
+		          private static final int MASK_ALL_INBOUND = MASK_EXCEPTION_CAUGHT | MASK_ONLY_INBOUND;
+		          static final int MASK_ONLY_OUTBOUND =  MASK_BIND | MASK_CONNECT | MASK_DISCONNECT |
+		                  MASK_CLOSE | MASK_DEREGISTER | MASK_READ | MASK_WRITE | MASK_FLUSH;
+		          private static final int MASK_ALL_OUTBOUND = MASK_EXCEPTION_CAUGHT | MASK_ONLY_OUTBOUND;
+
+		      翻译: 上面 4 个组合掩码按位或 (|) 的过程。| = 任一方为 1 结果就为 1; 各位互不重叠, 所以 | 等于相加。
+
+		      ① MASK_ONLY_INBOUND = 8 个纯入站事件 (bit1~bit8) 或在一起
+		      列: op=运算  bit=位  dec=十进制  hex=十六进制  binary=二进制  constant=常量
+		      +----+--------+-----+-------+-----------------------+---------------------------------
+		      | op | bit    | dec | hex   | binary (bit16~bit0)   | constant
+		      +====+========+=====+=======+=======================+=================================
+		      |    | 1<<1   | 2   | 0x2   | 0 0000 0000 0000 0010 | MASK_CHANNEL_REGISTERED
+		      | |  | 1<<2   | 4   | 0x4   | 0 0000 0000 0000 0100 | MASK_CHANNEL_UNREGISTERED
+		      | |  | 1<<3   | 8   | 0x8   | 0 0000 0000 0000 1000 | MASK_CHANNEL_ACTIVE
+		      | |  | 1<<4   | 16  | 0x10  | 0 0000 0000 0001 0000 | MASK_CHANNEL_INACTIVE
+		      | |  | 1<<5   | 32  | 0x20  | 0 0000 0000 0010 0000 | MASK_CHANNEL_READ
+		      | |  | 1<<6   | 64  | 0x40  | 0 0000 0000 0100 0000 | MASK_CHANNEL_READ_COMPLETE
+		      | |  | 1<<7   | 128 | 0x80  | 0 0000 0000 1000 0000 | MASK_USER_EVENT_TRIGGERED
+		      | |  | 1<<8   | 256 | 0x100 | 0 0000 0001 0000 0000 | MASK_CHANNEL_WRITABILITY_CHANGED
+		      +----+--------+-----+-------+-----------------------+---------------------------------
+		      | =  | bit1~8 | 510 | 0x1FE | 0 0000 0001 1111 1110 | MASK_ONLY_INBOUND
+		      +----+--------+-----+-------+-----------------------+---------------------------------
+
+		      ② MASK_ALL_INBOUND = exceptionCaught + 纯入站 (实现 Inbound 接口时, mask0 先置上这些位)
+		      列: op=运算  bit=位  dec=十进制  hex=十六进制  binary=二进制  constant=常量
+		      +----+--------+-----+-------+-----------------------+----------------------
+		      | op | bit    | dec | hex   | binary (bit16~bit0)   | constant
+		      +====+========+=====+=======+=======================+======================
+		      |    | 1<<0   | 1   | 0x1   | 0 0000 0000 0000 0001 | MASK_EXCEPTION_CAUGHT
+		      | |  | bit1~8 | 510 | 0x1FE | 0 0000 0001 1111 1110 | MASK_ONLY_INBOUND
+		      +----+--------+-----+-------+-----------------------+----------------------
+		      | =  | bit0~8 | 511 | 0x1FF | 0 0000 0001 1111 1111 | MASK_ALL_INBOUND
+		      +----+--------+-----+-------+-----------------------+----------------------
+
+		      ③ MASK_ONLY_OUTBOUND = 8 个纯出站操作 (bit9~bit16) 或在一起
+		      列: op=运算  bit=位  dec=十进制  hex=十六进制  binary=二进制  constant=常量
+		      +----+---------+--------+---------+-----------------------+-------------------
+		      | op | bit     | dec    | hex     | binary (bit16~bit0)   | constant
+		      +====+=========+========+=========+=======================+===================
+		      |    | 1<<9    | 512    | 0x200   | 0 0000 0010 0000 0000 | MASK_BIND
+		      | |  | 1<<10   | 1024   | 0x400   | 0 0000 0100 0000 0000 | MASK_CONNECT
+		      | |  | 1<<11   | 2048   | 0x800   | 0 0000 1000 0000 0000 | MASK_DISCONNECT
+		      | |  | 1<<12   | 4096   | 0x1000  | 0 0001 0000 0000 0000 | MASK_CLOSE
+		      | |  | 1<<13   | 8192   | 0x2000  | 0 0010 0000 0000 0000 | MASK_DEREGISTER
+		      | |  | 1<<14   | 16384  | 0x4000  | 0 0100 0000 0000 0000 | MASK_READ
+		      | |  | 1<<15   | 32768  | 0x8000  | 0 1000 0000 0000 0000 | MASK_WRITE
+		      | |  | 1<<16   | 65536  | 0x10000 | 1 0000 0000 0000 0000 | MASK_FLUSH
+		      +----+---------+--------+---------+-----------------------+-------------------
+		      | =  | bit9~16 | 130560 | 0x1FE00 | 1 1111 1110 0000 0000 | MASK_ONLY_OUTBOUND
+		      +----+---------+--------+---------+-----------------------+-------------------
+
+		      ④ MASK_ALL_OUTBOUND = exceptionCaught + 纯出站 (实现 Outbound 接口时, mask0 先置上这些位)
+		      列: op=运算  bit=位  dec=十进制  hex=十六进制  binary=二进制  constant=常量
+		      +----+-----------+--------+---------+-----------------------+----------------------
+		      | op | bit       | dec    | hex     | binary (bit16~bit0)   | constant
+		      +====+===========+========+=========+=======================+======================
+		      |    | 1<<0      | 1      | 0x1     | 0 0000 0000 0000 0001 | MASK_EXCEPTION_CAUGHT
+		      | |  | bit9~16   | 130560 | 0x1FE00 | 1 1111 1110 0000 0000 | MASK_ONLY_OUTBOUND
+		      +----+-----------+--------+---------+-----------------------+----------------------
+		      | =  | bit0,9~16 | 130561 | 0x1FE01 | 1 1111 1110 0000 0001 | MASK_ALL_OUTBOUND
+		      +----+-----------+--------+---------+-----------------------+----------------------
+
+		      一句话: ONLY_* 只含本方向的 8 位 (用来判断方向); ALL_* = ONLY_* 再加 bit0 exceptionCaught (用来初始化)。
+		              入站占低位 bit1~8, 出站占高位 bit9~16, 两组完全不重叠, 所以 MASK_ONLY_INBOUND & MASK_ONLY_OUTBOUND = 0。
+		              TODO: bit 编号从第 0 位开始 (最右边是 bit0): bitN 就是 1<<N, 共 bit0~bit16 这 17 位; bit0 = 1<<0 = 1 = exceptionCaught, bit16 = 1<<16 = 65536 = flush。
+
+		      组合掩码汇总 (ChannelHandlerMask L57~63, 由上面 17 个单一位拼出):
+		      列: constant=常量  contains=包含  dec=十进制  hex=十六进制  binary=二进制  用在哪
+		      +--------------------+---------------------------------+--------+---------+-----------------------+----------------------------------------------
+		      | constant           | contains                        | dec    | hex     | binary (bit16~bit0)   | 用在哪
+		      +====================+=================================+========+=========+=======================+==============================================
+		      | MASK_ONLY_INBOUND  | 1<<1 ~ 1<<8                     | 510    | 0x1FE   | 0 0000 0001 1111 1110 | 8 个纯入站; skipContext 的 onlyMask, 判断方向
+		      | MASK_ALL_INBOUND   | ONLY_INBOUND + exceptionCaught  | 511    | 0x1FF   | 0 0000 0001 1111 1111 | mask0 初始值: 实现 Inbound 接口时先全置 1
+		      | MASK_ONLY_OUTBOUND | 1<<9 ~ 1<<16                    | 130560 | 0x1FE00 | 1 1111 1110 0000 0000 | 8 个纯出站; skipContext 的 onlyMask, 判断方向
+		      | MASK_ALL_OUTBOUND  | ONLY_OUTBOUND + exceptionCaught | 130561 | 0x1FE01 | 1 1111 1110 0000 0001 | mask0 初始值: 实现 Outbound 接口时先全置 1
+		      +--------------------+---------------------------------+--------+---------+-----------------------+----------------------------------------------
+		      exceptionCaught 两边都算 → 1 + 8 + 8 = 17。
+		      为什么分 ONLY / ALL: 区别只在 exceptionCaught 那一位。初始化要包含它 (两个方向的 Handler 都可能重写 exceptionCaught);
+		        判断方向要排除它, 否则重写了 exceptionCaught 的 Outbound 会让 "该方向一个位都没有" 判断失效。
+		        例: OutboundA 掩码 0x8000, channelRead 时 0x8000 & (MASK_ONLY_INBOUND | MASK_CHANNEL_READ) = 0x8000 & 0x1FE = 0 → 跳过。
+		      跳过原理: addLast 时 mask0() 先按实现的接口 (Inbound / Outbound) 把该方向的位全置 1,
+		        再把没重写 (仍是 Adapter 里带 @Skip 的默认实现) 的方法对应位清 0;
+		        传播时 do { ctx = ctx.next / prev } while ((ctx.executionMask & 事件位) == 0), 例: OutboundA 只有 WRITE 位, channelRead 时被跳过。
+		      掩码计算过程 mask0() (ChannelHandlerMask L91):
+		        规则: ① 初始 mask = MASK_EXCEPTION_CAUGHT (1);
+		              ② 实现 ChannelInboundHandler  → mask |= MASK_ALL_INBOUND  (511), 再逐个检查 8 个入站方法;
+		              ③ 实现 ChannelOutboundHandler → mask |= MASK_ALL_OUTBOUND (130561), 再逐个检查 8 个出站方法;
+		              ④ 最后检查 exceptionCaught。
+		              检查方式 isSkippable: handlerType.getMethod(方法名, 参数类型) 拿到 "实际生效" 的那个 public 方法 (子类重写的优先),
+		              看它有没有 @Skip。Adapter 的默认方法都标了 @Skip; 子类重写后新方法上没有 @Skip (方法注解不继承)。
+		              有 @Skip → mask &= ~该位 (清 0, 表示没重写、可跳过); 没 @Skip → 保留该位。
+		        两个位运算: mask |= X → 把 X 中为 1 的位置 1;  mask &= ~X → 把 X 中为 1 的位清 0, 其余不变。
+		          例: 0x1FF & ~0x2 = 1 1111 1111 & ...1 1111 1101 = 1 1111 1101 = 0x1FD (只清掉了 bit1)。
+		        例 1: InboundHandlerAdapterA (继承 ChannelInboundHandlerAdapter, 只重写 channelRead)
+		          只看低 9 位 (bit8~bit0)。| 把对应位置 1; & ~X = 先把 X 取反 (只有该位为 0), 再按位与, 只清掉该位。
+		          列: op=运算  operand=运算数 (二进制)  note=运算数说明  result=结果 (二进制)  hex=十六进制  步骤
+		          +----+-------------+------------------+-------------+-------+--------------------------------
+		          | op | operand     | note             | result      | hex   | 步骤
+		          +====+=============+==================+=============+=======+================================
+		          | =  | 0 0000 0001 |                  | 0 0000 0001 | 0x1   | 初始 = MASK_EXCEPTION_CAUGHT
+		          | |  | 1 1111 1111 | MASK_ALL_INBOUND | 1 1111 1111 | 0x1FF | 是 Inbound
+		          | &  | 1 1111 1101 | ~0x2             | 1 1111 1101 | 0x1FD | channelRegistered @Skip
+		          | &  | 1 1111 1011 | ~0x4             | 1 1111 1001 | 0x1F9 | channelUnregistered @Skip
+		          | &  | 1 1111 0111 | ~0x8             | 1 1111 0001 | 0x1F1 | channelActive @Skip
+		          | &  | 1 1110 1111 | ~0x10            | 1 1110 0001 | 0x1E1 | channelInactive @Skip
+		          |    | -           |                  | 1 1110 0001 | 0x1E1 | channelRead 已重写, 不变
+		          | &  | 1 1011 1111 | ~0x40            | 1 1010 0001 | 0x1A1 | channelReadComplete @Skip
+		          | &  | 0 1111 1111 | ~0x100           | 0 1010 0001 | 0xA1  | channelWritabilityChanged @Skip
+		          | &  | 1 0111 1111 | ~0x80            | 0 0010 0001 | 0x21  | userEventTriggered @Skip
+		          |    | -           |                  | 0 0010 0001 | 0x21  | 不是 Outbound, 不变
+		          | &  | 1 1111 1110 | ~0x1             | 0 0010 0000 | 0x20  | exceptionCaught @Skip
+		          +----+-------------+------------------+-------------+-------+--------------------------------
+		          |    |             |                  | 0 0010 0000 | 0x20  | 最终 = 32
+		          +----+-------------+------------------+-------------+-------+--------------------------------
+		          结果: 只剩 bit5 = 32, 即 MASK_CHANNEL_READ
+		        例 2: OutboundHandlerAdapterA (继承 ChannelOutboundHandlerAdapter, 只重写 write)
+		          出站位在 bit9~bit16, 显示 17 位 (bit16~bit0)。
+		          列: op=运算  operand=运算数 (二进制)  note=运算数说明  result=结果 (二进制)  hex=十六进制  步骤
+		          +----+-----------------------+-------------------+-----------------------+---------+-----------------------------
+		          | op | operand               | note              | result                | hex     | 步骤
+		          +====+=======================+===================+=======================+=========+=============================
+		          | =  | 0 0000 0000 0000 0001 |                   | 0 0000 0000 0000 0001 | 0x1     | 初始 = MASK_EXCEPTION_CAUGHT
+		          |    | -                     |                   | 0 0000 0000 0000 0001 | 0x1     | 不是 Inbound, 不变
+		          | |  | 1 1111 1110 0000 0001 | MASK_ALL_OUTBOUND | 1 1111 1110 0000 0001 | 0x1FE01 | 是 Outbound
+		          | &  | 1 1111 1101 1111 1111 | ~0x200            | 1 1111 1100 0000 0001 | 0x1FC01 | bind @Skip
+		          | &  | 1 1111 1011 1111 1111 | ~0x400            | 1 1111 1000 0000 0001 | 0x1F801 | connect @Skip
+		          | &  | 1 1111 0111 1111 1111 | ~0x800            | 1 1111 0000 0000 0001 | 0x1F001 | disconnect @Skip
+		          | &  | 1 1110 1111 1111 1111 | ~0x1000           | 1 1110 0000 0000 0001 | 0x1E001 | close @Skip
+		          | &  | 1 1101 1111 1111 1111 | ~0x2000           | 1 1100 0000 0000 0001 | 0x1C001 | deregister @Skip
+		          | &  | 1 1011 1111 1111 1111 | ~0x4000           | 1 1000 0000 0000 0001 | 0x18001 | read @Skip
+		          |    | -                     |                   | 1 1000 0000 0000 0001 | 0x18001 | write 已重写, 不变
+		          | &  | 0 1111 1111 1111 1111 | ~0x10000          | 0 1000 0000 0000 0001 | 0x8001  | flush @Skip
+		          | &  | 1 1111 1111 1111 1110 | ~0x1              | 0 1000 0000 0000 0000 | 0x8000  | exceptionCaught @Skip
+		          +----+-----------------------+-------------------+-----------------------+---------+-----------------------------
+		          |    |                       |                   | 0 1000 0000 0000 0000 | 0x8000  | 最终 = 32768
+		          +----+-----------------------+-------------------+-----------------------+---------+-----------------------------
+		          结果: 只剩 bit15 = 32768, 即 MASK_WRITE
+		        实际计算结果 (反射调用 ChannelHandlerMask.mask 实测, Netty 4.1.113):
+		          列: class=类  dec=十进制  hex=十六进制  binary=二进制  含义
+		          +-------------------------------+--------+---------+-----------------------+--------------------------------------------------------
+		          | class                         | dec    | hex     | binary (bit16~bit0)   | 含义
+		          +===============================+========+=========+=======================+========================================================
+		          | InboundHandlerAdapterA        | 32     | 0x20    | 0 0000 0000 0010 0000 | 只有 channelRead (B / Business 结构相同, 结果一样)
+		          | OutboundHandlerAdapterA       | 32768  | 0x8000  | 0 1000 0000 0000 0000 | 只有 write (B 结构相同, 结果一样)
+		          | ChannelInboundHandlerAdapter  | 0      | 0x0     | 0 0000 0000 0000 0000 | 全是 @Skip 默认实现, 任何事件都跳过
+		          | ChannelOutboundHandlerAdapter | 0      | 0x0     | 0 0000 0000 0000 0000 | 同上
+		          | ChannelDuplexHandler          | 0      | 0x0     | 0 0000 0000 0000 0000 | 同上
+		          | SimpleChannelInboundHandler   | 32     | 0x20    | 0 0000 0000 0010 0000 | 重写了 channelRead (内部调 channelRead0 + 自动 release)
+		          | StringDecoder                 | 32     | 0x20    | 0 0000 0000 0010 0000 | MessageToMessageDecoder 重写了 channelRead
+		          | StringEncoder                 | 32768  | 0x8000  | 0 1000 0000 0000 0000 | MessageToMessageEncoder 重写了 write
+		          | HeadContext                   | 131071 | 0x1FFFF | 1 1111 1111 1111 1111 | 同时实现两个接口, 方法全部自己实现, 17 位全为 1
+		          | TailContext                   | 511    | 0x1FF   | 0 0000 0001 1111 1111 | 只实现 Inbound, 入站 8 位 + exceptionCaught
+		          +-------------------------------+--------+---------+-----------------------+--------------------------------------------------------
+		        结果按 Class 缓存 (FastThreadLocal<WeakHashMap>), 同一个类只反射计算一次。
+		        数值怎么拿到的 (实测, 不是手算):
+		          普通 Handler: 反射调用包内私有的 ChannelHandlerMask.mask(Class), 需先 setAccessible(true);
+		            Method m = Class.forName("io.netty.channel.ChannelHandlerMask").getDeclaredMethod("mask", Class.class);
+		            m.setAccessible(true);
+		            int v = (int) m.invoke(null, StringDecoder.class);                       // → 32
+		          Head / Tail: 新建空的 EmbeddedChannel, 反射读 pipeline 的 head / tail 字段上的 executionMask;
+		            EmbeddedChannel ch = new EmbeddedChannel();
+		            Field mask = Class.forName("io.netty.channel.AbstractChannelHandlerContext").getDeclaredField("executionMask");
+		            Field hf = DefaultChannelPipeline.class.getDeclaredField("head");
+		            Field tf = DefaultChannelPipeline.class.getDeclaredField("tail");
+		            mask.setAccessible(true); hf.setAccessible(true); tf.setAccessible(true);
+		            mask.get(hf.get(ch.pipeline()));                                           // → 131071 (0x1FFFF)
+		            mask.get(tf.get(ch.pipeline()));                                           // → 511    (0x1FF)
+		        HeadContext / TailContext 在哪: io.netty.channel.DefaultChannelPipeline 的内部类 (netty-transport-4.1.113.Final.jar),
+		          IDEA 里 Ctrl+N 搜 DefaultChannelPipeline, 再 Ctrl+F 搜 "class HeadContext"。
+		            63:   final HeadContext head;
+		            64:   final TailContext tail;
+		            96:   tail = new TailContext(this);                 // 构造 Pipeline 时创建两个哨兵
+		            97:   head = new HeadContext(this);
+		            99:   head.next = tail;                             // 空 Pipeline 就是 head ⇄ tail
+		            100:  tail.prev = head;
+		            1192: final class TailContext extends AbstractChannelHandlerContext implements ChannelInboundHandler {
+		            1195:     super(pipeline, null, TAIL_NAME, TailContext.class);           // 用自己的 Class 算掩码
+		            1252: final class HeadContext extends AbstractChannelHandlerContext
+		            1253:         implements ChannelOutboundHandler, ChannelInboundHandler {
+		            1258:     super(pipeline, null, HEAD_NAME, HeadContext.class);
+		          它们既是 Context 又是 Handler (handler() 返回 this), 同样走 mask(handlerClass) → mask0()。
+		          DefaultChannelPipeline.java 里一个 @Skip 都没有, 所以自己实现的方法一位都不清:
+		          列: class=类  interfaces=实现的接口  mask0=计算过程  result=结果 (二进制)  说明
+		          +-------------+--------------------+------------------------------------------------------+-----------------------+-----------------------------------------
+		          | class       | interfaces         | mask0                                                | result                | 说明
+		          +=============+====================+======================================================+=======================+=========================================
+		          | HeadContext | Inbound + Outbound | 1 OR MASK_ALL_INBOUND OR MASK_ALL_OUTBOUND, no @Skip | 1 1111 1111 1111 1111 | 0x1FFFF = 131071, 17 位全为 1
+		          | TailContext | Inbound            | 1 OR MASK_ALL_INBOUND, no @Skip                      | 0 0000 0001 1111 1111 | 0x1FF = 511, 没实现 Outbound, 出站位全 0
+		          +-------------+--------------------+------------------------------------------------------+-----------------------+-----------------------------------------
+		          这也是查找循环不判 null 的原因:
+		            出站往前找 → 一定停在 Head (出站位全 1), Head 调 unsafe.write / flush 把数据真正写到 socket;
+		            入站往后找 → 一定停在 Tail (入站位全 1), Tail 兜底: 释放没人处理的消息, 没人处理的异常打 warn。
+		      跳过判断源码 (AbstractChannelHandlerContext L1068~1095):
+		        private AbstractChannelHandlerContext findContextInbound(int mask) {     // 入站: 沿 next 往后
+		            AbstractChannelHandlerContext ctx = this;
+		            EventExecutor currentExecutor = executor();
+		            do {
+		                ctx = ctx.next;
+		            } while (skipContext(ctx, currentExecutor, mask, MASK_ONLY_INBOUND));
+		            return ctx;
+		        }
+		        // findContextOutbound 完全对称: ctx = ctx.prev, onlyMask 换成 MASK_ONLY_OUTBOUND
+		        private static boolean skipContext(AbstractChannelHandlerContext ctx, EventExecutor currentExecutor,
+		                                           int mask, int onlyMask) {                 // 返回 true = 跳过
+		            return (ctx.executionMask & (onlyMask | mask)) == 0 ||                    // ① 该方向一个位都没有 → 必跳
+		                   (ctx.executor() == currentExecutor && (ctx.executionMask & mask) == 0); // ② 同线程且没重写该方法 → 跳
+		        }
+		        ① 纯 Outbound Handler 在入站时无条件跳过 (反之亦然: 表示 纯 Inbound Handler 在出站时无条件跳过), OutboundA 就是这样被跳过的。
+		        ② 同方向但没重写当前方法 (如 Inbound 没重写 channelRead) 也跳过; 但若它绑定了别的 executor
+		           (addLast(group, name, handler)) 就不能跳, 必须提交到它的线程, 由 Adapter 默认方法转发, 保证事件顺序 (netty #10067)。
+		        调用方: fireChannelRead → findContextInbound(MASK_CHANNEL_READ) (L412);
+		               write / writeAndFlush → findContextOutbound(flush ? MASK_WRITE | MASK_FLUSH : MASK_WRITE) (L976)。
+		        循环不判 null: Head / Tail 是哨兵, 各自方向位齐全, 查找一定停在它们身上。
+		        示例 inboundA.fireChannelRead("hello"), mask = MASK_CHANNEL_READ (0x20), onlyMask = MASK_ONLY_INBOUND (0x1FE):
+		          列: loop=循环  executionMask=该 ctx 的掩码  cond1=条件一 (该方向一个位都没有)  cond2=条件二 (同线程且没重写 channelRead)  结果
+		          +------+-----------+---------------+--------------------------------+-----------------------------+------------------------------------------
+		          | loop | ctx       | executionMask | cond1: m & 0x1FE == 0          | cond2: m & 0x20 == 0        | 结果
+		          +======+===========+===============+================================+=============================+==========================================
+		          | 1    | outboundA | 0x8000        | 0x8000 & 0x1FE = 0     -> true | (not evaluated)             | 条件一成立 -> 跳过
+		          | 2    | inboundB  | 0x20          | 0x20 & 0x1FE = 0x20   -> false | 0x20 & 0x20 = 0x20 -> false | 都不成立 -> 停下, 调 inboundB.channelRead
+		          +------+-----------+---------------+--------------------------------+-----------------------------+------------------------------------------
 
 		- ③ 内存 ByteBuf:
 		    · 读写双指针: 0 <= readerIndex <= writerIndex <= capacity, 读写切换不用 flip (对比 NIO ByteBuffer)。

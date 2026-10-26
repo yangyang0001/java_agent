@@ -5,14 +5,14 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 
-/** 位于 Business 前方，两种发送入口都会经过这里。 */
-public final class OutboundA extends ChannelOutboundHandlerAdapter {
+/** 位于 InboundHandlerAdapterBusiness 后方，只有从 Channel 链尾发送时才会经过这里。 */
+public final class OutboundHandlerAdapterB extends ChannelOutboundHandlerAdapter {
 
     @Override
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
-        // BP9：两种发送入口都会到达这里。
-        PipelineLogger.log("OUT", ctx, msg);
-        // 继续向前查找 Outbound，并传递原 Promise。
+        // BP8：只有 CHANNEL_WRITE 会到达这里。
+        PipelineLogger.log("OUT", "write", ctx, msg);
+        // 不要换成 ctx.channel().write(...)，否则又从 Tail 开始，可能递归。
         ctx.write(msg, promise);
     }
 }
