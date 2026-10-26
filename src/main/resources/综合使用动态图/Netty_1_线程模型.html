@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Netty 1 · 线程模型（主从 Reactor）</title>
+<link rel="stylesheet" href="common.css">
+<style>
+.netty-nav{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:13px}
+.netty-nav a,.sources a{color:var(--accent);text-underline-offset:3px}
+.netty-nav [aria-current]{font-weight:700;text-decoration-thickness:2px}
+.sources{display:flex;flex-wrap:wrap;gap:8px 20px;font-size:13px}
+.stage .mono{font-family:var(--f-mono);font-size:12px}
+.stage .small{font-size:11px}
+.stage .title{font-size:13px}
+.now .desc{overflow-wrap:anywhere}
+@media(max-width:420px){.wrap{padding:18px 10px 32px}.panel{padding:12px}.ctl{flex-wrap:wrap}.controls{padding:10px}.netty-nav{gap:6px 12px}}
+</style>
+</head>
+<body>
+<main class="wrap">
+<header>
+<p class="eyebrow">Netty · 1 / 8 · 谁来执行</p>
+<h1>线程模型（主从 Reactor）</h1>
+<p class="lede">Boss 接收连接，Worker EventLoop 负责已注册连接的 I/O、任务队列和定时任务。一个 EventLoop 通常服务多个 Channel；阻塞一个循环，会拖慢分配给它的其他连接。以下采用 Netty 4.1 的经典 NIO 模型。</p>
+</header>
+<nav class="netty-nav" aria-label="Netty 八个知识单元"><a href="Netty_1_线程模型.html" aria-current="page">1. 线程模型</a>
+<a href="Netty_2_处理链.html">2. 处理链</a>
+<a href="Netty_3_内存.html">3. 内存</a>
+<a href="Netty_4_编解码.html">4. 编解码</a>
+<a href="Netty_5_异步结果.html">5. 异步结果</a>
+<a href="Netty_6_连接生命周期.html">6. 连接生命周期</a>
+<a href="Netty_7_流量控制.html">7. 流量控制</a>
+<a href="Netty_8_传输层.html">8. 传输层</a></nav>
+<section class="controls" id="controls" aria-label="播放控制"></section>
+<div class="grid">
+<section class="panel stage">
+<div class="panel-h"><h2>运行过程与故障对照</h2><div class="legend"><span><i class="sw" style="background:var(--accent)"></i>当前处理</span><span><i class="sw" style="background:var(--warn)"></i>等待 / 压力</span><span><i class="sw" style="background:var(--bad)"></i>错误路径</span></div></div>
+<svg id="svg" viewBox="0 0 700 420" role="img" aria-label="线程模型的状态与消息流转动态图"></svg>
+<p class="cap">教学示意，时间与容量不按真实比例。切换场景可对照正常流程与故障；方向键逐步查看，空格暂停或播放。</p>
+</section>
+<aside class="col">
+<section class="panel now" aria-live="polite"><span class="k" id="nowNo"></span><h3 id="nowTitle"></h3><div class="desc" id="nowDesc"></div></section>
+<section class="panel"><div class="panel-h"><h2>关键代码 / 场景片段</h2></div><pre class="code" id="code"></pre></section>
+<section class="panel"><div class="panel-h"><h2>步骤</h2></div><ol class="steps" id="stepList"></ol></section>
+</aside>
+</div>
+<section class="panel notes"><div class="panel-h"><h2>最小知识单元</h2></div><div class="tablewrap"><table><thead><tr><th>概念</th><th>落地边界</th></tr></thead><tbody><tr><td>EventLoopGroup</td><td>管理多个 EventLoop；服务端常见 boss / worker 两组。</td></tr>
+<tr><td>EventLoop</td><td>经典 NIO 实现使用单线程，执行多个 Channel 的 I/O 与任务。</td></tr>
+<tr><td>业务 Executor</td><td>卸载耗时工作；容量、排队、超时、拒绝策略均需明确。</td></tr></tbody></table></div></section>
+<section class="panel notes"><div class="panel-h"><h2>常见问题与排查</h2></div><div class="tablewrap"><table><thead><tr><th>现象</th><th>先检查什么 / 如何处理</th></tr></thead><tbody><tr><td>多条连接一起变慢</td><td>查 EL 线程栈、阻塞调用与事件循环延迟；卸载耗时任务。</td></tr>
+<tr><td>加线程仍无改善</td><td>单连接仍受其所属 EL 串行处理约束；排查业务与协议瓶颈。</td></tr>
+<tr><td>共享 Handler 数据串线</td><td>默认每连接创建 Handler；可共享实例必须无竞态，@Sharable 不是加锁。</td></tr>
+<tr><td>响应顺序错乱</td><td>普通线程池任务可能乱序完成；按连接串行或用 requestId 重排。</td></tr></tbody></table></div></section>
+<section class="panel"><div class="panel-h"><h2>官方参考 · Netty 4.1</h2></div><div class="sources"><a href="https://netty.io/4.1/api/io/netty/channel/EventLoop.html" target="_blank" rel="noopener noreferrer">EventLoop</a>
+<a href="https://netty.io/4.1/api/io/netty/channel/ChannelPipeline.html" target="_blank" rel="noopener noreferrer">ChannelPipeline</a></div><p class="cap">代码为说明机制的局部片段；示例中的业务类型、线程池、编解码器和指标方法由应用提供，标明伪代码的部分不是完整实现。</p></section>
+</main>
+<script src="player.js"></script>
+<script>window.NETTY_PAGE = {"name":"线程模型","mechanism":"主从 Reactor","question":"谁来执行","lede":"Boss 接收连接，Worker EventLoop 负责已注册连接的 I/O、任务队列和定时任务。一个 EventLoop 通常服务多个 Channel；阻塞一个循环，会拖慢分配给它的其他连接。以下采用 Netty 4.1 的经典 NIO 模型。","nodes":[["客户端","连接 A / B / C"],["Boss Group","accept / 注册分配"],["Worker EL-1","Channel A、B"],["Worker EL-2","Channel C"],["业务线程池","有界队列 / 拒绝策略"],["响应","回到连接所属循环"]],"edges":[[0,1],[1,2],[1,3],[2,4],[4,5]],"scenarios":[{"label":"主从 Reactor：连接与请求","code":["EventLoopGroup boss = new NioEventLoopGroup(1);","EventLoopGroup workers = new NioEventLoopGroup();","ServerBootstrap b = new ServerBootstrap();","b.group(boss, workers)"," .channel(NioServerSocketChannel.class)"," .childHandler(new ChannelInitializer\u003cSocketChannel>() {","   protected void initChannel(SocketChannel ch) {","     ch.pipeline().addLast(new EchoHandler());","   }"," });","// 在启动线程等待，不在 I/O 回调中等待","Channel server = b.bind(8080).sync().channel();","// 关闭服务后释放两个 group：shutdownGracefully()"],"state":{},"steps":[{"title":"启动两个 Group","desc":"\u003cp>Boss Group 与 Worker Group 是两组执行资源；它们不是“每条连接一个线程”。EchoHandler 在本页指轻量、无阻塞的业务 Handler。\u003c/p>","set":{"values":["发起连接","监听 8080","select 等待","select 等待","尚未使用","尚未产生"],"status":["","accent","","","",""]},"line":[1,2,4]},{"title":"Boss 接收连接","desc":"\u003cp>Boss EventLoop 处理 accept，将新建的 SocketChannel 注册给某个 Worker EventLoop。\u003c/p>","set":{"values":["A / B / C","accept","待注册","待注册","尚未使用","尚未产生"],"status":["","accent","","","",""]},"moves":[[0,1,"connect"]],"line":5},{"title":"连接绑定 Worker","desc":"\u003cp>示意分配：A、B 归 EL-1，C 归 EL-2。连接保持注册期间，I/O 由其所属 EventLoop 处理；增加 Worker 数不会让同一连接的 I/O 并行执行。\u003c/p>","set":{"values":["三条已连接","继续 accept","绑定 A、B","绑定 C","尚未使用","尚未产生"],"status":["","","accent","","",""]},"moves":[[1,2,"A / B"],[1,3,"C"]],"line":4},{"title":"EL-1 串行执行回调","desc":"\u003cp>A 与 B 的 channelRead 在 EL-1 中逐个执行。默认未指定额外 executor 的 Handler 跟随连接的 EventLoop。\u003c/p>","set":{"values":["A / B 请求","等待新连接","A → B 回调","C 独立处理","尚未使用","生成 A / B 响应"],"status":["","","accent","","",""]},"moves":[[2,5,"response"]],"line":8},{"title":"循环继续处理任务与定时器","desc":"\u003cp>EL-1 在 I/O、普通任务和定时任务之间调度。不要将一个 EventLoop 理解为只调用 select 的线程。\u003c/p>","set":{"values":["持续请求","继续 accept","I/O + task + timer","独立调度","尚未使用","按连接发送"],"status":["","","accent","","",""]}}]},{"label":"故障对照：阻塞与业务卸载","code":["// 前提：已解码成普通 Request；无需跨线程持有 ByteBuf","// bizPool 是预先创建的有界 ThreadPoolExecutor","void channelRead0(ChannelHandlerContext ctx, Request req) {","  try {","    bizPool.execute(() -> {","      Result result = callBlockingService(req);","      ctx.executor().execute(() -> {","        if (ctx.channel().isActive()) {","          ctx.writeAndFlush(result); // 已配置 Result 的 Encoder","        }","      });","    });","  } catch (RejectedExecutionException overloaded) {","    ctx.close(); // 示例拒绝策略：关闭；生产可返回过载响应","  }","}","// 禁止在 EventLoop 中 sleep / JDBC / Future.get()","// 并发任务可能乱序完成；严格顺序协议需串行化或序号重排"],"state":{},"steps":[{"title":"错误：在 EL-1 调用慢接口","desc":"\u003cp>假设 A 的回调执行阻塞 JDBC 两秒：EL-1 无法处理 B 的 I/O、心跳以及队列任务。\u003c/p>","set":{"values":["A 请求 / B 等待","accept 正常","A 阻塞 2 秒","C 正常","空闲","A、B 均延迟"],"status":["","","bad","","","warn"]},"badLine":17},{"title":"卸载阻塞调用","desc":"\u003cp>先把协议数据解码为普通业务对象，再交给有界线程池。若确实传递 ByteBuf，必须另行建立 retain / release 的所有权配对。\u003c/p>","set":{"values":["A 请求","accept 正常","提交任务后返回","C 正常","执行 A 慢接口","尚未完成"],"status":["","","","","accent",""]},"moves":[[2,4,"Request"]],"line":[4,5,6]},{"title":"EL-1 继续服务 B","desc":"\u003cp>业务池执行 A 时，EL-1 可继续处理 B。线程池满了必须拒绝、降载或限流；CallerRunsPolicy 会把阻塞工作重新压回 I/O 线程。\u003c/p>","set":{"values":["B 请求","accept 正常","B 正常处理","C 正常","A 处理中","B 已响应"],"status":["","","accent","","",""]},"moves":[[2,5,"B"]],"line":[13,14]},{"title":"业务结果回到所属执行器","desc":"\u003cp>业务任务完成后将连接状态更新与发送调度回 ctx.executor()。此例 Handler 未配置额外 executor，因此它是所属 EventLoop。\u003c/p>","set":{"values":["A / B 正常","accept 正常","处理结果任务","C 正常","A 已完成","发送 A 响应"],"status":["","","","","","accent"]},"moves":[[4,2,"Result"],[2,5,"A"]],"line":[7,8,9]}]}],"concepts":[["EventLoopGroup","管理多个 EventLoop；服务端常见 boss / worker 两组。"],["EventLoop","经典 NIO 实现使用单线程，执行多个 Channel 的 I/O 与任务。"],["业务 Executor","卸载耗时工作；容量、排队、超时、拒绝策略均需明确。"]],"issues":[["多条连接一起变慢","查 EL 线程栈、阻塞调用与事件循环延迟；卸载耗时任务。"],["加线程仍无改善","单连接仍受其所属 EL 串行处理约束；排查业务与协议瓶颈。"],["共享 Handler 数据串线","默认每连接创建 Handler；可共享实例必须无竞态，@Sharable 不是加锁。"],["响应顺序错乱","普通线程池任务可能乱序完成；按连接串行或用 requestId 重排。"]],"sources":[["EventLoop","https://netty.io/4.1/api/io/netty/channel/EventLoop.html"],["ChannelPipeline","https://netty.io/4.1/api/io/netty/channel/ChannelPipeline.html"]]};</script>
+<script src="netty-diagrams.js"></script>
+</body>
+</html>

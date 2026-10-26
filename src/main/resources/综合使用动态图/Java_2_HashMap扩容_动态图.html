@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HashMap 扩容动态图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .code { font-size: 11.5px; }
+  .stage .box.rb-b { fill: var(--surface); stroke: var(--ink); stroke-width: 2; }
+  .stage .link { stroke: var(--muted); stroke-width: 1.4; }
+  .stage .link.tree { stroke: var(--violet); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Java 基础 · 2 · HashMap</p>
+    <h1>HashMap 扩容：16 → 32，每个桶拆成高低两条链</h1>
+    <p class="lede">JDK8 的 HashMap 是数组 + 链表 + 红黑树。<code>hash = h ^ (h &gt;&gt;&gt; 16)</code>，下标 <code>(n - 1) &amp; hash</code>。<code>size &gt; threshold</code> 时容量翻倍；扩容时按 <code>hash &amp; oldCap</code> 把每个桶拆成两条链：低位链留在 <code>j</code>，高位链移到 <code>j + oldCap</code>，尾插保持顺序。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>table 数组与桶中的链表</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--accent)"></i>本步写入</span>
+            <span><i class="sw" style="background:var(--ok)"></i>低位链（留在 j）</span>
+            <span><i class="sw" style="background:var(--violet)"></i>高位链（去 j + oldCap）/ TreeNode</span>
+            <span><i class="sw" style="background:var(--warn)"></i>触发扩容</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 480" role="img" aria-label="HashMap 的桶数组、链表节点在扩容时按高低位拆分移动的过程"></svg>
+        <p class="cap">key 都用 <code>Integer</code>：它的 <code>hashCode()</code> 就是数值本身，方便心算下标。格子里的小字是桶下标。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel"><div class="panel-h"><h2>代码</h2></div><pre class="code" id="code"></pre></section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <ul>
+      <li>结构（JDK8）：<code>Node[] table</code> + 链表 + 红黑树。<code>hash = h ^ (h &gt;&gt;&gt; 16)</code> 让高 16 位参与运算、减少碰撞；下标 <code>(n - 1) &amp; hash</code>。</li>
+      <li>链表长度 ≥ 8（<code>TREEIFY_THRESHOLD</code>）且数组长度 ≥ 64（<code>MIN_TREEIFY_CAPACITY</code>）时转红黑树；数组长度 &lt; 64 时优先扩容；树节点 ≤ 6（<code>UNTREEIFY_THRESHOLD</code>）时退化回链表。</li>
+      <li>初始化：默认容量 16、负载因子 0.75、阈值 12；构造时不建数组，第一次 <code>put</code> 才 <code>resize()</code>；指定容量会被 <code>tableSizeFor</code> 向上取到 2 的幂（10 → 16）。</li>
+      <li>容量必须是 2 的幂：才能用 <code>(n - 1) &amp; hash</code> 代替取模，扩容时新位置也能快速算出。</li>
+      <li>扩容：<code>size &gt; threshold</code> 时容量和阈值都翻倍；按 <code>hash &amp; oldCap</code> 拆成高低两条链，<code>== 0</code> 留在 <code>j</code>，<code>!= 0</code> 移到 <code>j + oldCap</code>；不重新计算 hash，尾插保持顺序。</li>
+      <li>JDK7：数组 + 链表、头插法、扩容时逐个重新计算下标；并发扩容时头插会反转链表，可能形成环 → <code>get</code> 死循环。JDK8 改尾插解决了死循环，但 HashMap 仍非线程安全（并发 <code>put</code> 会丢数据），并发场景用 <code>ConcurrentHashMap</code>。</li>
+      <li>对比：<code>Hashtable</code> 默认 11、扩容 <code>2n + 1</code>；<code>ConcurrentHashMap</code>（JDK8）用 CAS + <code>synchronized</code> 锁桶头节点，支持多线程协助扩容。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, move } = Player;
+  const TX = 28, CW = 44, NW = 40, NH = 20, GAP = 28;
+  const SRC = { x: 50, y: 30 };
+  const CLS = { lo: 'ok', hi: 'violet', red: 'bad', black: 'rb-b' };
+
+  // 节点工具：n(标签, 行, 桶, 链中位置, 颜色)
+  const N = (t, r, b, k, c) => ({ t, r, b, k, c: c || '', x: 0, y: 0, hid: false });
+  const at = (r, b, k, c) => ({ r, b, k, c: c || '' });
+  const T = (x, y, c) => ({ r: 'tree', x, y, c });
+
+  const rows3 = (a, b, c) => ({
+    A: { y: 92, start: 0, label: a, show: false },
+    B: { y: 262, start: 0, label: b, show: false },
+    C: { y: 372, start: 16, label: c, show: false },
+  });
+
+  // ---------- 场景 1：JDK8 扩容 ----------
+  const sc1 = {
+    label: 'JDK8：put 触发扩容，高低位拆分',
+    code: ['static int hash(Object key) {', '  int h = key.hashCode();', '  return h ^ (h >>> 16);', '}',
+      '// putVal（节选）', 'if ((tab = table) == null)', '  n = (tab = resize()).length;', 'i = (n - 1) & hash;',
+      '// 桶空直接放，否则遍历到尾部尾插', 'if (++size > threshold) resize();',
+      '// resize（节选）', 'newCap = oldCap << 1;  // 32', 'newThr = oldThr << 1;  // 24',
+      'if ((e.hash & oldCap) == 0)', '  // 接到低位链 loHead…loTail', 'else', '  // 接到高位链 hiHead…hiTail',
+      'newTab[j] = loHead;', 'newTab[j + oldCap] = hiHead;'],
+    state: { rows: rows3('table（length 16）', 'newTab[0 ~ 15]（length 32）', 'newTab[16 ~ 31]'), nodes: {},
+      info: ['', ''], ic: '', stat: ['table = null', 'size = 0', 'threshold = 0'] },
+    steps: [
+      { title: 'new HashMap<>()：先不建数组',
+        desc: '<p>无参构造只设置负载因子 0.75，<code>table</code> 还是 <code>null</code>。</p><p>第一次 <code>put</code> 时才调用 <code>resize()</code> 创建数组，这是<b>懒加载</b>。</p>',
+        set: { info: ['new HashMap<>()：table = null（懒加载）', '默认容量 16、负载因子 0.75，第一次 put 时才 resize() 建表'] } },
+      { title: 'put(5)：resize() 建表，放进桶 5', line: [1, 2, 3, 6, 7, 8], hotCell: { A: { 5: 'accent' } }, hotN: { n5: 'accent' },
+        desc: '<p><code>table == null</code>，先 <code>resize()</code>：容量 16，阈值 <code>16 × 0.75 = 12</code>。</p><p><code>hash = 5 ^ (5 &gt;&gt;&gt; 16) = 5</code>，下标 <code>15 &amp; 5 = 5</code>。</p>',
+        set: { rows: { A: { show: true } }, nodes: { n5: N('5', 'A', 5, 0) }, info: ['hash = 5 ^ (5 >>> 16) = 5', 'index = (16 - 1) & 5 = 5'], stat: ['table.length = 16', 'size = 1', 'threshold = 16 × 0.75 = 12'] } },
+      { title: 'put(21)：同一个桶，尾插', line: [8, 9], hotCell: { A: { 5: 'accent' } }, hotN: { n21: 'accent' },
+        desc: '<p><code>15 &amp; 21 = 5</code>，又落到桶 5，发生<b>哈希碰撞</b>。</p><p>JDK8 遍历到链表尾部，把新节点接在后面（<b>尾插</b>）。</p>',
+        set: { nodes: { n21: N('21', 'A', 5, 1) }, info: ['hash = 21，index = 15 & 21 = 5', '桶 5 已有节点 → 遍历到链表尾部，尾插'], stat: ['table.length = 16', 'size = 2', 'threshold = 12'] } },
+      { title: 'put(65545)：高 16 位参与运算', line: [1, 2, 3, 8], hotCell: { A: { 8: 'accent' } }, hotN: { n65545: 'accent' },
+        desc: '<p><code>65545 = 0x0001_0009</code>。如果直接用 <code>h</code>，下标是 <code>15 &amp; h = 9</code>，<b>高 16 位完全没用上</b>。</p><p>异或 <code>h &gt;&gt;&gt; 16</code> 后 <code>hash = 0x0001_0008</code>，下标变成 8：高位也影响了下标，减少碰撞。</p>',
+        set: { nodes: { n65545: N('65545', 'A', 8, 0) }, info: ['h = 0x0001_0009，h >>> 16 = 0x0001', 'hash = h ^ (h >>> 16) = 0x0001_0008 → index = 15 & hash = 8'], stat: ['table.length = 16', 'size = 3', 'threshold = 12'] } },
+      { title: 'put(37)、put(53)：链表变长', line: [8, 9], hotCell: { A: { 5: 'accent' } }, hotN: { n37: 'accent', n53: 'accent' },
+        desc: '<p><code>37 &amp; 15 = 5</code>，<code>53 &amp; 15 = 5</code>，都在桶 5。</p><p>尾插后链表是 <code>5 → 21 → 37 → 53</code>，和插入顺序一致。</p>',
+        set: { nodes: { n37: N('37', 'A', 5, 2), n53: N('53', 'A', 5, 3) }, info: ['37 & 15 = 5，53 & 15 = 5', '尾插：5 → 21 → 37 → 53，保持插入顺序'], stat: ['table.length = 16', 'size = 5', 'threshold = 12'] } },
+      { title: '再 put 7 个，size = 12', line: [8, 9, 10], hotN: { n1: 'accent', n17: 'accent', n3: 'accent', n11: 'accent', n10: 'accent', n12: 'accent', n14: 'accent' },
+        desc: '<p>放入 1、17、3、11、10、12、14，<code>size = 12</code>。</p><p>判断条件是 <code>++size &gt; threshold</code>，12 不大于 12，<b>还不扩容</b>。</p>',
+        set: { nodes: { n1: N('1', 'A', 1, 0), n17: N('17', 'A', 1, 1), n3: N('3', 'A', 3, 0), n11: N('11', 'A', 11, 0), n10: N('10', 'A', 10, 0), n12: N('12', 'A', 12, 0), n14: N('14', 'A', 14, 0) },
+          info: ['put 1、17、3、11、10、12、14 → size = 12', '12 不大于 threshold 12，不扩容（条件是 ++size > threshold）'], stat: ['table.length = 16', 'size = 12', 'threshold = 12'] } },
+      { title: 'put(30)：size = 13 > 12，触发扩容', line: 10, hotRow: { A: 'warn' }, hotN: { n30: 'accent' },
+        desc: '<p><code>30 &amp; 15 = 14</code>，尾插到 14 后面。</p><p class="warn"><code>++size = 13 &gt; 12</code>，调用 <code>resize()</code>。</p>',
+        set: { nodes: { n30: N('30', 'A', 14, 1) }, info: ['30 & 15 = 14，尾插到 14 后面', '++size = 13 > threshold 12 → resize()'], ic: 'c-warn', stat: ['table.length = 16', 'size = 13', 'threshold = 12'] } },
+      { title: 'resize()：容量、阈值都翻倍', line: [12, 13],
+        desc: '<p>新建长度 32 的数组，阈值变成 24。</p><p>下面把新数组画成两行：上行是下标 0 ~ 15，下行是 16 ~ 31，<b>j 和 j + 16 上下对齐</b>。</p>',
+        set: { rows: { B: { show: true }, C: { show: true } }, info: ['newCap = oldCap << 1 = 32', 'newThr = oldThr << 1 = 24'], ic: 'c-accent', stat: ['table.length = 16 → 32', 'size = 13', 'threshold = 12 → 24'] } },
+      { title: '拆分桶 5：看 hash & oldCap', line: [14, 15, 16, 17], tags: { n5: ['&16 = 0', 'ok'], n21: ['&16 = 16', 'violet'], n37: ['&16 = 0', 'ok'], n53: ['&16 = 16', 'violet'] },
+        desc: '<p>新下标 <code>hash &amp; 31</code> 比旧下标 <code>hash &amp; 15</code> 只多看一位，就是 <code>oldCap = 16</code> 这一位。</p><p>这一位是 0 → <b class="ok">低位链</b>；是 1 → <b style="color:var(--violet)">高位链</b>。不用重新计算 hash。</p>',
+        set: { nodes: { n5: { c: 'lo' }, n21: { c: 'hi' }, n37: { c: 'lo' }, n53: { c: 'hi' } }, info: ['hash & 16：5 → 0，21 → 16，37 → 0，53 → 16', '== 0 接到低位链 loHead，!= 0 接到高位链 hiHead'], ic: '' } },
+      { title: '低位链留在 j，高位链去 j + 16', line: [18, 19], hotCell: { B: { 5: 'ok' }, C: { 5: 'violet' } },
+        desc: '<p>低位链 <code>5 → 37</code> 放到 <code>newTab[5]</code>。</p><p>高位链 <code>21 → 53</code> 放到 <code>newTab[5 + 16] = newTab[21]</code>。</p><p>尾插：两条链都保持原来的相对顺序。</p>',
+        set: { nodes: { n5: at('B', 5, 0, 'lo'), n37: at('B', 5, 1, 'lo'), n21: at('C', 5, 0, 'hi'), n53: at('C', 5, 1, 'hi') }, info: ['低位链 5 → 37 → newTab[5]', '高位链 21 → 53 → newTab[5 + 16] = newTab[21]'], ic: 'c-ok' } },
+      { title: '其他桶同样处理', line: [14, 15, 16, 17, 18, 19], tags: { n17: ['&16 = 16', 'violet'], n30: ['&16 = 16', 'violet'] },
+        desc: '<p>桶 1：<code>1</code> 留在 1，<code>17</code> 去 17。桶 14：<code>14</code> 留在 14，<code>30</code> 去 30。</p><p>只有一个节点的桶直接放到 <code>e.hash &amp; (newCap - 1)</code>，结果同样只能是 <code>j</code> 或 <code>j + 16</code>。</p>',
+        set: { nodes: { n1: at('B', 1, 0, 'lo'), n17: at('C', 1, 0, 'hi'), n14: at('B', 14, 0, 'lo'), n30: at('C', 14, 0, 'hi'),
+          n3: at('B', 3, 0, 'lo'), n11: at('B', 11, 0, 'lo'), n65545: at('B', 8, 0, 'lo'), n10: at('B', 10, 0, 'lo'), n12: at('B', 12, 0, 'lo') },
+          info: ['桶 1：1 → 1，17 → 17；桶 14：14 → 14，30 → 30', '单节点桶：newTab[e.hash & (newCap - 1)] = e'], ic: '' } },
+      { title: 'table = newTab，扩容完成', dwell: 3800,
+        desc: '<p>旧数组被丢弃，<code>table</code> 指向新数组。</p><p>整个过程<b>没有重新计算 hash</b>，每个节点要么不动，要么正好移动 <code>oldCap</code> 个位置。</p>',
+        set: { rows: { A: { show: false } }, nodes: Object.fromEntries(['n1', 'n17', 'n3', 'n5', 'n21', 'n37', 'n53', 'n11', 'n65545', 'n10', 'n12', 'n14', 'n30'].map(id => [id, { c: '' }])),
+          info: ['新下标只可能是 j 或 j + oldCap，不重新计算 hash', '尾插保持顺序；size = 13 ≤ threshold 24'], ic: 'c-ok', stat: ['table.length = 32', 'size = 13', 'threshold = 24'] } },
+    ],
+  };
+
+  // ---------- 场景 2：JDK7 头插 ----------
+  const sc2 = {
+    label: 'JDK7：头插法，扩容后顺序反转',
+    code: ['// JDK 7 addEntry → createEntry', 'Entry e = table[i];', 'table[i] = new Entry(h, k, v, e);', '// ↑ 新节点 next 指向旧头：头插',
+      '// JDK 7 transfer（扩容）', 'for (Entry e : table) {', '  while (e != null) {', '    Entry next = e.next;',
+      '    int i = indexFor(e.hash, newCap);', '    e.next = newTable[i];  // 头插', '    newTable[i] = e;', '    e = next;', '  }', '}'],
+    state: { rows: rows3('table（length 16）', 'newTable[0 ~ 15]（length 32）', 'newTable[16 ~ 31]'), nodes: {},
+      info: ['', ''], ic: '', stat: ['table.length = 16', 'size = 0', 'threshold = 12'] },
+    steps: [
+      { title: 'JDK7：数组 + 链表',
+        desc: '<p>JDK7 的 HashMap 是 <code>Entry[]</code> + 链表，没有红黑树。</p><p>碰撞时用<b>头插法</b>：新节点放到链表头部。</p>',
+        set: { rows: { A: { show: true } }, info: ['JDK 7：Entry[] table + 链表，没有红黑树', 'put 发生碰撞时用头插法：新节点放到链表头部'] } },
+      { title: 'put(5)', line: [2, 3], hotCell: { A: { 5: 'accent' } }, hotN: { n5: 'accent' },
+        desc: '<p><code>5 &amp; 15 = 5</code>，放进桶 5。</p>',
+        set: { nodes: { n5: N('5', 'A', 5, 0) }, info: ['indexFor(5, 16) = 5 & 15 = 5', 'table[5] = 5'], stat: ['table.length = 16', 'size = 1', 'threshold = 12'] } },
+      { title: 'put(21)：头插到 5 前面', line: [2, 3, 4], hotCell: { A: { 5: 'accent' } }, hotN: { n21: 'accent' },
+        desc: '<p>新节点的 <code>next</code> 指向原来的头 5，再成为新的头。</p><p>链表变成 <code>21 → 5</code>：<b>后插入的在前面</b>。</p>',
+        set: { nodes: { n21: N('21', 'A', 5, 0), n5: { k: 1 } }, info: ['new Entry(21).next = table[5]（5）', 'table[5] = 21 → 链表 21 → 5'], stat: ['table.length = 16', 'size = 2', 'threshold = 12'] } },
+      { title: 'put(37)、put(53)', line: [2, 3], hotCell: { A: { 5: 'accent' } }, hotN: { n37: 'accent', n53: 'accent' },
+        desc: '<p>每次都插到头部，链表变成 <code>53 → 37 → 21 → 5</code>，和插入顺序相反。</p>',
+        set: { nodes: { n53: N('53', 'A', 5, 0), n37: N('37', 'A', 5, 1), n21: { k: 2 }, n5: { k: 3 } }, info: ['头插：53 → 37 → 21 → 5', '链表顺序与插入顺序相反'], stat: ['table.length = 16', 'size = 4', 'threshold = 12'] } },
+      { title: '扩容：transfer 到 32', line: [5, 6, 7], hotRow: { A: 'warn' },
+        desc: '<p>为了演示 <code>transfer</code>，假设此时触发扩容（JDK7 条件：<code>size &gt;= threshold</code> 且目标桶非空）。</p><p>JDK7 逐个遍历旧链表，<b>每个节点重新算下标</b>，再头插到新桶。</p>',
+        set: { rows: { B: { show: true }, C: { show: true } }, info: ['newTable = new Entry[32]，从头遍历旧链表 53 → 37 → 21 → 5', '每个节点：indexFor(hash, 32)，再头插到新桶'], ic: 'c-warn', stat: ['table.length = 16 → 32', 'size = 4', 'threshold = 12 → 24'] } },
+      { title: '搬 53：下标 21', line: [8, 9, 10, 11], hotCell: { C: { 5: 'violet' } }, hotN: { n53: 'accent' },
+        desc: '<p><code>e = 53</code>，先记住 <code>next = 37</code>。</p><p><code>53 &amp; 31 = 21</code>，放到 <code>newTable[21]</code>。</p>',
+        set: { nodes: { n53: at('C', 5, 0, 'hi') }, info: ['e = 53，next = 37', 'indexFor(53, 32) = 21 → newTable[21] = 53'], ic: '' } },
+      { title: '搬 37：下标 5', line: [8, 9, 10, 11], hotCell: { B: { 5: 'ok' } }, hotN: { n37: 'accent' },
+        desc: '<p><code>e = 37</code>，<code>37 &amp; 31 = 5</code>，放到 <code>newTable[5]</code>。</p>',
+        set: { nodes: { n37: at('B', 5, 0, 'lo') }, info: ['e = 37，next = 21', 'indexFor(37, 32) = 5 → newTable[5] = 37'] } },
+      { title: '搬 21：头插到 53 前面', line: [10, 11], hotCell: { C: { 5: 'violet' } }, hotN: { n21: 'accent' },
+        desc: '<p><code>21.next = newTable[21]</code>（也就是 53），再让 <code>newTable[21] = 21</code>。</p><p>新链：<code>21 → 53</code>。</p>',
+        set: { nodes: { n21: at('C', 5, 0, 'hi'), n53: { k: 1 } }, info: ['e = 21：21.next = newTable[21]（53）', 'newTable[21] = 21 → 链表 21 → 53'] } },
+      { title: '搬 5：头插到 37 前面', line: [10, 11], hotCell: { B: { 5: 'ok' } }, hotN: { n5: 'accent' },
+        desc: '<p><code>5.next = newTable[5]</code>（37），<code>newTable[5] = 5</code>。</p><p>新链：<code>5 → 37</code>。</p>',
+        set: { nodes: { n5: at('B', 5, 0, 'lo'), n37: { k: 1 } }, info: ['e = 5：5.next = newTable[5]（37）', 'newTable[5] = 5 → 链表 5 → 37'] } },
+      { title: '结果：相对顺序被反转',
+        desc: '<p>旧链里 53 在 21 前、37 在 5 前；搬完后变成 <code>21 → 53</code>、<code>5 → 37</code>，<b class="warn">顺序反了</b>。</p><p>单线程下只是顺序变化，问题出在并发。</p>',
+        set: { rows: { A: { show: false } }, info: ['旧链：53 → 37 → 21 → 5', '新链：5 → 37、21 → 53：相对顺序全部反转'], ic: 'c-warn', stat: ['table.length = 32', 'size = 4', 'threshold = 24'] } },
+      { title: '并发扩容：可能形成环', ring: true, dwell: 4200, line: [8, 10, 11],
+        desc: '<p>旧链 <code>A → B</code> 落到同一个新桶。线程 1 拿着 <code>e = A、next = B</code> 挂起；线程 2 完成扩容，链变成 <code>B → A</code>。</p><p>线程 1 恢复后继续头插：<code>A.next = B</code>，又读到 <code>B.next = A</code> → <b class="bad">环形链表</b>，之后 <code>get</code> 死循环。</p><p>JDK8 改为尾插并保持顺序，解决了这个问题。</p>',
+        set: { info: ['两个线程同时 transfer：线程 1 的 e / next 已被线程 2 反转', '最终 A.next = B 且 B.next = A → get() 死循环（JDK8 尾插解决）'], ic: 'c-bad' } },
+    ],
+  };
+
+  // ---------- 场景 3：树化条件 ----------
+  const P = [5, 21, 37, 53, 69, 85, 101, 117];
+  const Q = [5, 69, 133, 197, 261, 325, 389, 453];
+  const pn = {}; P.forEach((v, k) => { pn['p' + v] = N(String(v), 'A', 5, k); });
+  const qn = {}; Q.forEach((v, k) => { qn['q' + v] = N(String(v), 'A', 5, k); });
+  const rows3b = { A: { y: 92, start: 0, label: 'table（length 16）', show: true }, B: { y: 262, start: 0, label: '', show: false }, C: { y: 300, start: 16, label: 'newTab[16 ~ 31]', show: false } };
+  const stQ = {
+    rows: { A: { y: 92, start: 0, label: 'table[0 ~ 15]（length 64，只画前 16 个桶）', show: true }, B: { y: 262, start: 0, label: '', show: false }, C: { y: 300, start: 16, label: '', show: false } },
+    nodes: qn, edges: [], root: null,
+    info: ['table.length = 64，桶 5：5 → 69 → 133 → … → 453（8 个）', '这些 key 的低 6 位相同：(64 - 1) & hash = 5'], ic: '', stat: ['table.length = 64', 'size = 8', 'threshold = 48'],
+  };
+  const TREE = { q197: T(330, 170, 'black'), q69: T(170, 240, 'red'), q325: T(490, 240, 'red'), q5: T(90, 310, 'black'), q133: T(250, 310, 'black'),
+    q261: T(410, 310, 'black'), q453: T(570, 310, 'black'), q389: T(510, 380, 'red'), q517: T(630, 380, 'red') };
+  const sc3 = {
+    label: '树化：链表 ≥ 8，但 table < 64 先扩容',
+    code: ['// putVal：遍历链表尾插', 'for (int binCount = 0; ; ++binCount) {', '  if ((e = p.next) == null) {', '    p.next = newNode(hash, k, v, null);',
+      '    if (binCount >= TREEIFY_THRESHOLD - 1)', '      treeifyBin(tab, hash);', '    break;', '  }', '  p = e;', '}',
+      '// treeifyBin', 'if (tab.length < MIN_TREEIFY_CAPACITY)', '  resize();         // < 64：先扩容', 'else {',
+      '  // Node → TreeNode（双向链表）', '  hd.treeify(tab);  // 建红黑树', '}'],
+    state: { rows: rows3b, nodes: pn, edges: [], root: null,
+      info: ['table.length = 16，桶 5：5 → 21 → … → 117（8 个）', '这些 key 的低 4 位都是 0101，全落在桶 5'], ic: '', stat: ['table.length = 16', 'size = 8', 'threshold = 12'] },
+    steps: [
+      { title: '桶 5 已有 8 个节点', line: [2, 3, 9],
+        desc: '<p>key 依次是 <code>5 + 16k</code>，低 4 位都一样，全部落在桶 5，链表长度已经是 8。</p>' },
+      { title: 'put(133)：尾插第 9 个', line: [3, 4, 5, 6], hotN: { p133: 'accent' }, hotCell: { A: { 5: 'accent' } },
+        desc: '<p>遍历到尾部时 <code>binCount = 7</code>，满足 <code>binCount &gt;= TREEIFY_THRESHOLD - 1</code>（8 - 1）。</p><p>新节点接到尾部后调用 <code>treeifyBin</code>。</p>',
+        set: { nodes: { p133: N('133', 'A', 5, 8) }, info: ['尾插第 9 个节点，binCount = 7 ≥ TREEIFY_THRESHOLD - 1 = 7', '→ treeifyBin(tab, hash)'], stat: ['table.length = 16', 'size = 9', 'threshold = 12'] } },
+      { title: 'table 不足 64：不树化，先扩容', line: [12, 13], badLine: 13, hotRow: { A: 'warn' },
+        desc: '<p><code>tab.length = 16 &lt; MIN_TREEIFY_CAPACITY = 64</code>。</p><p class="warn">不转红黑树，而是 <code>resize()</code>：数组小时，扩容就能把长链拆短，比建树划算。</p>',
+        set: { info: ['tab.length = 16 < MIN_TREEIFY_CAPACITY = 64', '不转红黑树，改为 resize()'], ic: 'c-warn' } },
+      { title: 'resize 到 32：长链被拆短', line: 13, hotCell: { A: { 5: 'ok' }, C: { 5: 'violet' } },
+        desc: '<p>按 <code>hash &amp; 16</code> 拆分：低位链 <code>5, 37, 69, 101, 133</code> 留在桶 5，高位链 <code>21, 53, 85, 117</code> 去桶 21。</p><p>最长链从 9 降到 5，<b class="ok">不再需要树化</b>。</p>',
+        set: { rows: { A: { label: 'newTab[0 ~ 15]（length 32）' }, C: { show: true } },
+          nodes: { p5: at('A', 5, 0, 'lo'), p37: at('A', 5, 1, 'lo'), p69: at('A', 5, 2, 'lo'), p101: at('A', 5, 3, 'lo'), p133: at('A', 5, 4, 'lo'),
+            p21: at('C', 5, 0, 'hi'), p53: at('C', 5, 1, 'hi'), p85: at('C', 5, 2, 'hi'), p117: at('C', 5, 3, 'hi') },
+          info: ['低位链 5 → 37 → 69 → 101 → 133 留在桶 5', '高位链 21 → 53 → 85 → 117 去桶 21；最长链 9 → 5'], ic: 'c-ok', stat: ['table.length = 32', 'size = 9', 'threshold = 24'] } },
+      { title: '换个情况：table 已经是 64', state: stQ, line: [2, 3, 9],
+        desc: '<p>现在假设 table 长度已经是 64。key 依次是 <code>5 + 64k</code>，低 6 位相同，全在桶 5，链表长度 8。</p>' },
+      { title: 'put(517)：再次 treeifyBin', line: [4, 5, 6, 12, 14], hotN: { q517: 'accent' }, hotCell: { A: { 5: 'accent' } },
+        desc: '<p>尾插第 9 个，<code>binCount = 7</code>，调用 <code>treeifyBin</code>。</p><p class="ok"><code>tab.length = 64 ≥ 64</code>，这次真正树化。</p>',
+        set: { nodes: { q517: N('517', 'A', 5, 8) }, info: ['binCount = 7 ≥ 7 → treeifyBin', 'tab.length = 64 ≥ MIN_TREEIFY_CAPACITY → 树化'], ic: 'c-ok', stat: ['table.length = 64', 'size = 9', 'threshold = 48'] } },
+      { title: 'Node 换成 TreeNode', line: 15,
+        desc: '<p>先把每个 <code>Node</code> 替换成 <code>TreeNode</code>，用 <code>prev / next</code> 串成双向链表，顺序不变。</p><p>树化后节点仍保留链表指针，方便迭代和扩容拆分。</p>',
+        set: { nodes: Object.fromEntries([...Q, 517].map(v => ['q' + v, { c: 'hi' }])), info: ['Node → TreeNode，prev / next 组成双向链表', '链表顺序保留：5 ⇄ 69 ⇄ 133 ⇄ … ⇄ 517'], ic: '' } },
+      { title: 'treeify：建红黑树', line: 16, dwell: 3600,
+        desc: '<p>按 hash 大小逐个插入并做红黑平衡（<code>balanceInsertion</code>）。</p><p><code>moveRootToFront</code> 把根节点 197 放到 <code>table[5]</code>。查找从 O(n) 变成 O(log n)。</p>',
+        set: { nodes: TREE, edges: [['q197', 'q69'], ['q197', 'q325'], ['q69', 'q5'], ['q69', 'q133'], ['q325', 'q261'], ['q325', 'q453'], ['q453', 'q389'], ['q453', 'q517']], root: 'q197',
+          info: ['按 hash 插入红黑树并平衡：黑色根 197，红色节点不相邻', 'moveRootToFront：table[5] 指向根节点 197'], ic: 'c-ok' } },
+      { title: '小结：树化的两个条件', dwell: 3800,
+        desc: '<p>链表长度 ≥ 8（<code>TREEIFY_THRESHOLD</code>）<b>且</b> table 长度 ≥ 64（<code>MIN_TREEIFY_CAPACITY</code>）才树化；否则先扩容。</p><p>树节点 ≤ 6（<code>UNTREEIFY_THRESHOLD</code>）时退化回链表。</p>',
+        set: { info: ['链表 ≥ 8 且 table ≥ 64 → 树化；table < 64 → 先扩容', '树节点 ≤ 6（UNTREEIFY_THRESHOLD）时退化回链表'], ic: 'c-accent' } },
+    ],
+  };
+
+  let E;
+  function nodeXY(st, n) {
+    if (n.r === 'tree') return { x: n.x - NW / 2, y: n.y - NH / 2 };
+    return { x: TX + n.b * CW + 2, y: st.rows[n.r].y + 32 + n.k * GAP };
+  }
+
+  Player({
+    scenarios: [sc1, sc2, sc3],
+    dwell: 3000,
+    init(g) {
+      E = { rows: {}, nodes: {} };
+      svg('rect', { x: 20, y: 8, width: 504, height: 56, rx: 8, class: 'box soft' }, g);
+      E.i1 = svg('text', { x: 34, y: 31, class: 'mono' }, g, '');
+      E.i2 = svg('text', { x: 34, y: 53, class: 'small' }, g, '');
+      svg('rect', { x: 536, y: 8, width: 204, height: 56, rx: 8, class: 'box' }, g);
+      E.s = [0, 1, 2].map(k => svg('text', { x: 550, y: 24 + k * 16, class: 'mono small' }, g, ''));
+      for (const r of ['A', 'B', 'C']) {
+        const rg = svg('g', { class: 'hide' }, g);
+        const label = svg('text', { x: TX, y: -8, class: 'mono small muted' }, rg, '');
+        const cells = [], idx = [];
+        for (let b = 0; b < 16; b++) {
+          cells.push(svg('rect', { x: TX + b * CW + 1, y: 0, width: CW - 2, height: 24, rx: 3, class: 'box soft anim' }, rg));
+          idx.push(svg('text', { x: TX + b * CW + CW / 2, y: 16, 'text-anchor': 'middle', class: 'small muted' }, rg, ''));
+        }
+        E.rows[r] = { g: rg, label, cells, idx };
+      }
+      E.links = svg('g', {}, g);
+      E.nodeLayer = svg('g', {}, g);
+    },
+    render(st, step, i, ctx) {
+      E.i1.textContent = st.info[0];
+      E.i2.textContent = st.info[1];
+      E.i1.setAttribute('class', 'mono ' + (st.ic || ''));
+      st.stat.forEach((t, k) => { E.s[k].textContent = t; });
+
+      for (const r in E.rows) {
+        const R = E.rows[r], cfg = st.rows[r];
+        move(R.g, 0, cfg.y);
+        if (!R.g.classList.contains('anim')) { R.g.getBoundingClientRect(); R.g.classList.add('anim'); }
+        R.g.classList.toggle('hide', !cfg.show);
+        R.label.textContent = cfg.label;
+        const hc = (step.hotCell || {})[r] || {}, hr = (step.hotRow || {})[r];
+        R.cells.forEach((c, b) => c.setAttribute('class', 'box anim ' + (hc[b] || hr || 'soft')));
+        R.idx.forEach((t, b) => { t.textContent = cfg.start + b; });
+      }
+
+      // 节点
+      for (const id in E.nodes) if (!st.nodes[id]) E.nodes[id].g.classList.add('hide');
+      for (const id in st.nodes) {
+        const n = st.nodes[id];
+        let el = E.nodes[id];
+        if (!el) {
+          const g = svg('g', { class: 'hide' }, E.nodeLayer);
+          move(g, SRC.x, SRC.y);
+          const rect = svg('rect', { width: NW, height: NH, rx: 4, class: 'box' }, g);
+          const t = svg('text', { x: NW / 2, y: 14, 'text-anchor': 'middle', class: 'mono small' }, g, n.t);
+          g.getBoundingClientRect();
+          g.classList.add('anim');
+          el = E.nodes[id] = { g, rect, t };
+        }
+        const p = nodeXY(st, n);
+        el.g.classList.remove('hide');
+        move(el.g, p.x, p.y);
+        const hot = (step.hotN || {})[id];
+        el.rect.setAttribute('class', 'box anim ' + (hot || CLS[n.c] || n.c || ''));
+        el.t.setAttribute('class', 'mono small');
+      }
+
+      // 链表连线 / 树边：等节点到位后再淡入
+      while (E.links.firstChild) E.links.removeChild(E.links.firstChild);
+      const lg = svg('g', { class: 'anim hide' }, E.links);
+      lg.style.transitionDelay = '550ms';
+      const chains = {};
+      for (const id in st.nodes) {
+        const n = st.nodes[id];
+        if (n.r === 'tree' || !st.rows[n.r].show) continue;
+        (chains[n.r + n.b] = chains[n.r + n.b] || []).push(n);
+      }
+      for (const key in chains) {
+        const list = chains[key].sort((a, b) => a.k - b.k);
+        const x = TX + list[0].b * CW + CW / 2, y0 = st.rows[list[0].r].y + 24;
+        svg('line', { x1: x, y1: y0, x2: x, y2: y0 + 8 + list[0].k * GAP, class: 'link' }, lg);
+        for (let k = 1; k < list.length; k++) {
+          const y = st.rows[list[k].r].y + 32 + list[k - 1].k * GAP + NH;
+          svg('line', { x1: x, y1: y, x2: x, y2: y + GAP - NH, class: 'link' }, lg);
+        }
+      }
+      for (const [a, b] of st.edges || []) {
+        const A = st.nodes[a], B = st.nodes[b];
+        svg('line', { x1: A.x, y1: A.y + NH / 2, x2: B.x, y2: B.y - NH / 2, class: 'link tree' }, lg);
+      }
+      if (st.root) {
+        const R = st.nodes[st.root];
+        Player.arrow(lg, TX + 5 * CW + CW / 2, st.rows.A.y + 24, R.x - 6, R.y - NH / 2 - 2, 'accent');
+        svg('text', { x: R.x + 26, y: R.y - 14, class: 'small c-accent' }, lg, 'table[5] = root');
+      }
+      requestAnimationFrame(() => requestAnimationFrame(() => lg.classList.remove('hide')));
+
+      // hash & oldCap 标签
+      for (const id in step.tags || {}) {
+        const [txt, cls] = step.tags[id];
+        const p = nodeXY(st, st.nodes[id]);
+        svg('text', { x: p.x + NW + 4, y: p.y + 14, class: 'mono small c-' + cls }, ctx.fx, txt);
+      }
+
+      // JDK7 并发成环示意
+      if (step.ring) {
+        const f = ctx.fx;
+        svg('rect', { x: 430, y: 96, width: 300, height: 150, rx: 10, class: 'box bad dashed' }, f);
+        svg('text', { x: 446, y: 118, class: 'small c-bad' }, f, '并发 transfer 后（示意）');
+        const ring = svg('g', {}, f);
+        svg('rect', { x: 480, y: 156, width: 50, height: 26, rx: 5, class: 'box bad' }, ring);
+        svg('text', { x: 505, y: 174, 'text-anchor': 'middle', class: 'mono' }, ring, 'A');
+        svg('rect', { x: 630, y: 156, width: 50, height: 26, rx: 5, class: 'box bad' }, ring);
+        svg('text', { x: 655, y: 174, 'text-anchor': 'middle', class: 'mono' }, ring, 'B');
+        svg('path', { d: 'M530,162 C565,136 595,136 626,160', class: 'wire bad flow', 'marker-end': 'url(#arrow-bad)' }, ring);
+        svg('path', { d: 'M630,176 C595,202 565,202 534,178', class: 'wire bad flow', 'marker-end': 'url(#arrow-bad)' }, ring);
+        Player.arrow(f, 0, 0, 0, 0, 'bad').remove();
+        svg('text', { x: 580, y: 140, 'text-anchor': 'middle', class: 'mono small c-bad' }, f, 'A.next');
+        svg('text', { x: 580, y: 216, 'text-anchor': 'middle', class: 'mono small c-bad' }, f, 'B.next');
+        svg('text', { x: 580, y: 236, 'text-anchor': 'middle', class: 'small' }, f, 'get() 沿 next 遍历永远走不出去');
+      }
+    },
+  });
+})();
+</script>
+</body>
+</html>

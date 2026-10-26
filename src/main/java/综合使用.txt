@@ -1,0 +1,1079 @@
+java 基础:
+	1. ArrayList 中的 初始大小和扩容倍数 给出动态图 Java_1_ArrayList扩容_动态图.html
+		- 底层是 Object[] elementData。
+		- new ArrayList() 时并不立刻分配 10, 而是指向一个共享空数组 DEFAULTCAPACITY_EMPTY_ELEMENTDATA (JDK8+ 懒加载);
+		  第一次 add 时才扩容到默认容量 10。new ArrayList(n) 则直接分配 n。
+		- 扩容: newCapacity = oldCapacity + (oldCapacity >> 1), 即 1.5 倍;
+		  若 1.5 倍仍不够, 直接用所需的最小容量; 超过 MAX_ARRAY_SIZE (Integer.MAX_VALUE - 8) 时走 hugeCapacity。
+		- 扩容方式: Arrays.copyOf 创建新数组并整体复制 (System.arraycopy), 是 O(n) 操作,
+		  所以能预估数据量时应指定初始容量。
+		- 对比: Vector 默认 10, 扩容 2 倍; ArrayList 非线程安全。
+
+	2. Map 的构成, 初始化大小 和 扩容倍数 以及扩容方式 以 HashMap 为主 给出动态图 Java_2_HashMap扩容_动态图.html
+		- 结构 (JDK8): 数组 (Node[] table) + 链表 + 红黑树。
+		    · 定位桶: hash = h ^ (h >>> 16) (高 16 位参与运算, 减少碰撞), index = (n - 1) & hash。
+		    · 链表长度 >= 8 (TREEIFY_THRESHOLD) 且 数组长度 >= 64 (MIN_TREEIFY_CAPACITY) 时链表转红黑树;
+		      数组长度 < 64 时优先扩容而不是树化。树节点数 <= 6 (UNTREEIFY_THRESHOLD) 时退化回链表。
+		- 初始化: 默认容量 16, 负载因子 0.75, 阈值 threshold = 16 * 0.75 = 12。
+		    · 懒加载: 构造时不建数组, 第一次 put 时才 resize() 创建。
+		    · 指定容量时会通过 tableSizeFor 向上取到 2 的幂 (如传 10 → 16)。
+		    · 容量必须是 2 的幂, 才能用 (n - 1) & hash 代替取模, 且扩容时元素位置可以快速计算。
+		- 扩容: size > threshold 时触发, 容量变为原来的 2 倍, 阈值也翻倍。
+		- 扩容方式 (JDK8): 遍历旧桶, 按 (hash & oldCap) 把每个桶拆成高低两条链:
+		    · == 0 → 低位链, 留在原下标 j;
+		    · != 0 → 高位链, 移到 j + oldCap。
+		  不需要重新计算 hash, 且使用尾插法保持原有顺序。
+		- JDK7 区别: 数组 + 链表, 头插法, 扩容时重新计算下标; 并发扩容时头插法会把链表顺序反转, 可能形成环形链表 → get 死循环。
+		  JDK8 改成尾插法解决了死循环, 但 HashMap 依然非线程安全 (并发 put 会丢数据), 并发场景用 ConcurrentHashMap。
+		- 对比: Hashtable 默认 11, 扩容 2n + 1; ConcurrentHashMap (JDK8) 采用 CAS + synchronized 锁桶头节点, 支持多线程协助扩容。
+
+	3. 封装、继承、多态
+		- 封装: 隐藏内部状态和实现细节, 只通过对外暴露的方法访问 (private 字段 + public 方法),
+		  目的是降低耦合、保证数据合法性。
+		- 继承: 子类复用父类的属性和方法并可扩展 (extends); Java 类单继承, 接口多实现。
+		  核心是 is-a 关系, 能用组合时优先组合 (继承会破坏封装、增加耦合)。
+		- 多态: 同一个引用调用同一个方法, 运行时根据实际对象类型执行不同实现。
+		    · 三个条件: 继承/实现、方法重写、父类引用指向子类对象。
+		    · 底层原理: 动态绑定, invokevirtual / invokeinterface 指令在运行时通过虚方法表 (vtable / itable) 找到实际方法。
+		    · 重载 (overload) 是编译期多态 (静态分派), 重写 (override) 是运行期多态 (动态分派)。
+
+JUC包:
+	1. AQS 是什么, 列举内部方法 给出动态图 JUC_1_AQS_动态图.html
+		- AbstractQueuedSynchronizer, 抽象队列同步器, 是 ReentrantLock、ReentrantReadWriteLock、Semaphore、
+		  CountDownLatch 等的底层框架。
+		- 核心三要素:
+		    · volatile int state: 同步状态 (锁重入次数 / 许可数 / 计数器), 通过 CAS 修改;
+		    · CLH 变体的 FIFO 双向等待队列: 获取失败的线程封装成 Node 入队, 并 LockSupport.park 挂起;
+		    · 模板方法模式: AQS 负责排队、阻塞、唤醒, 子类只需要定义 state 的含义 (怎么算获取成功)。
+		- 两种模式: 独占 (EXCLUSIVE, 如 ReentrantLock) 和 共享 (SHARED, 如 Semaphore、CountDownLatch)。
+		- 子类需要重写的方法 (钩子方法):
+		    tryAcquire(int) / tryRelease(int)               独占获取/释放
+		    tryAcquireShared(int) / tryReleaseShared(int)   共享获取/释放
+		    isHeldExclusively()                             当前线程是否独占 (Condition 使用)
+		- 状态操作: getState() / setState(int) / compareAndSetState(int, int)
+		- 对外的模板方法:
+		    acquire / acquireInterruptibly / tryAcquireNanos / release
+		    acquireShared / acquireSharedInterruptibly / tryAcquireSharedNanos / releaseShared
+		    hasQueuedPredecessors (公平锁用)、hasQueuedThreads、getQueueLength
+		- 内部关键方法 (JDK8):
+		    addWaiter            把当前线程封装成 Node, CAS 加到队尾
+		    enq                  自旋 + CAS 入队, 队列为空时先初始化 head 哑节点
+		    acquireQueued        在队列中自旋: 前驱是 head 就 tryAcquire, 否则判断是否 park
+		    shouldParkAfterFailedAcquire  把前驱的 waitStatus 设为 SIGNAL (-1), 跳过 CANCELLED 节点
+		    parkAndCheckInterrupt         LockSupport.park 挂起, 醒来后返回中断标记
+		    unparkSuccessor      释放时唤醒后继节点 (后继为空或已取消时从 tail 往前找)
+		    cancelAcquire        取消节点
+		- Node.waitStatus: CANCELLED(1)、SIGNAL(-1)、CONDITION(-2)、PROPAGATE(-3)、0。
+		- 内部类 ConditionObject: 实现 await / signal, 维护一个单向条件队列, signal 时把节点转移到同步队列。
+
+	2. ReentrantLock 重入的概念 给出动态图 JUC_2_ReentrantLock重入_动态图.html
+		- 可重入: 已经持有锁的线程再次获取同一把锁时可以直接成功, 不会被自己阻塞 (避免自己和自己死锁, 如递归调用加锁方法)。
+		- 实现:
+		    · AQS 的 exclusiveOwnerThread 记录持有锁的线程;
+		    · lock 时 state == 0 → CAS 设为 1 并记录 owner;
+		      state != 0 且 owner == 当前线程 → state + 1 (重入);
+		    · unlock 时 state - 1, 减到 0 才真正释放锁 (owner 置 null) 并唤醒后继。
+		- 所以 lock 了几次就必须 unlock 几次, unlock 要放在 finally 中。
+		- 公平 / 非公平: 非公平锁 (默认) 获取时先直接 CAS 抢一次; 公平锁会先通过 hasQueuedPredecessors() 判断队列中有没有人在排队。
+		- synchronized 也是可重入的 (ObjectMonitor 中的 _recursions 计数)。
+
+	3. 虚假唤醒 给出动态图 JUC_3_虚假唤醒_动态图.html
+		- 线程在 wait() / Condition.await() 中被唤醒, 但它等待的条件其实并不满足。
+		- 原因:
+		    · 操作系统层面: pthread_cond_wait 等底层实现允许在没有 notify 的情况下返回 (POSIX 规范允许);
+		    · 业务层面: notifyAll 唤醒了多个线程, 条件被第一个线程消费掉了, 其余线程醒来条件已不成立。
+		- 解决: 条件判断必须用 while 而不是 if, 醒来后重新检查条件:
+		    synchronized (lock) {
+		        while (!condition) {
+		            lock.wait();
+		        }
+		        // 处理业务
+		    }
+
+	4. 伪共享 给出动态图 JUC_4_伪共享与MESI_动态图.html
+		- CPU 缓存以缓存行 (Cache Line, 通常 64 字节) 为单位读写。
+		- 两个线程修改的是不同变量, 但这两个变量在同一个缓存行里, 一个核修改后,
+		  MESI 协议会让其它核上的整个缓存行失效, 导致它们反复重新从内存加载 → 看起来没有共享, 实际在互相竞争缓存行, 性能大幅下降。
+		- 解决:
+		    · 缓存行填充: 在变量前后填充 7 个 long, 让变量独占一个缓存行 (Disruptor 的做法);
+		    · JDK8 @sun.misc.Contended (JDK9+ 为 jdk.internal.vm.annotation.Contended), 需要 -XX:-RestrictContended 才对业务代码生效。
+		- JDK 中的例子: LongAdder 的 Cell 类、ConcurrentHashMap 的 CounterCell、Thread 中 ThreadLocalRandom 相关字段都用了 @Contended。
+		- 补充: MESI 缓存一致性协议
+		    · 作用: 多核 CPU 各自有私有缓存 (L1/L2), MESI 保证同一个缓存行在多个核之间的数据一致。
+		      实现方式是总线嗅探 (Bus Snooping): 每个核监听总线上其他核的读写请求, 并据此修改自己缓存行的状态。
+		    · 四种状态 (每个缓存行用 2 位标记):
+		        M (Modified)   已修改: 只有当前核有该行, 且已被修改, 与主存不一致; 被替换或其他核读取时要先写回主存。
+		        E (Exclusive)  独占:   只有当前核有该行, 与主存一致; 写入时直接改为 M, 不需要通知其他核。
+		        S (Shared)     共享:   多个核都有该行, 与主存一致; 写入前必须先让其他核的副本失效。
+		        I (Invalid)    失效:   该行无效, 使用时要重新加载。
+		    · 典型状态流转:
+		        核A 读 X (其他核没有)       → A: E
+		        核B 也读 X                 → A: S, B: S
+		        核A 写 X                   → A 广播 Invalidate, 等其他核回复 ACK 后 → A: M, B: I
+		        核B 再读 X                 → A 嗅探到读请求, 把数据写回主存 / 直接转发给 B → A: S, B: S
+		      伪共享就是两个核反复在 "M ↔ I" 之间争抢同一个缓存行。
+		    · 和内存屏障的关系:
+		        严格执行 MESI 时, 写操作要等其他核回复 Invalidate ACK, CPU 会空等。为此 CPU 引入了两个优化:
+		        Store Buffer: 写操作先放入写缓冲区, 不等 ACK 就继续执行后面的指令;
+		        Invalidate Queue: 收到失效请求先放进队列, 立刻回复 ACK, 稍后再真正让缓存行失效。
+		        这两个优化导致 MESI 也无法保证立即可见, 从外部看就像发生了重排序。
+		        内存屏障就是用来解决这个问题的: 写屏障强制清空 Store Buffer, 读屏障强制处理完 Invalidate Queue。
+		        所以 volatile 的可见性 = MESI (硬件保证最终一致) + 内存屏障 (保证及时可见、禁止重排)。
+		    · 注意: MESI 是硬件层面的协议, JMM 是语言层面的规范。Java 程序员只需要依赖 happens-before,
+		      不需要也不能直接控制 MESI。
+
+	5. 顺序一致性内存模型
+		- 一个理想化的理论参考模型, 有两个特征:
+		    · 每个线程内的操作严格按程序顺序执行;
+		    · 所有线程只能看到一个单一的全局操作顺序, 每个操作都是原子的且立刻对所有线程可见。
+		  可以理解为: 有一个全局开关, 每次只让一个线程的一个操作访问内存。
+		- JMM 不保证未同步的程序具有顺序一致性 (会有重排序和可见性问题, 例如 long/double 的非原子写)。
+		- JMM 的承诺 (DRF-SC): 如果程序是正确同步的 (没有数据竞争), 那么它的执行结果和在顺序一致性模型中的结果相同。
+		  在此前提下, 临界区内依然允许重排序, 以兼顾性能。
+
+	6. HappenBefore
+		- JMM 对程序员的可见性承诺: 如果 A happens-before B, 那么 A 的结果对 B 可见, 且 A 的执行顺序 (语义上) 排在 B 之前。
+		- 它不等于时间上的先后: 只要结果一致, JVM 仍然可以重排序。
+		- 规则:
+		    · 程序顺序规则: 同一线程内, 前面的操作 hb 后面的操作;
+		    · 监视器锁规则: unlock hb 之后对同一把锁的 lock;
+		    · volatile 规则: 对 volatile 变量的写 hb 之后对它的读;
+		    · 传递性: A hb B, B hb C → A hb C;
+		    · start 规则: Thread.start() hb 该线程中的所有操作;
+		    · join 规则: 线程中的所有操作 hb 其它线程从该线程的 join() 成功返回;
+		    · 中断规则: interrupt() hb 被中断线程检测到中断;
+		    · 终结器规则: 构造函数结束 hb finalize() 开始。
+		- 本质: hb 是 JMM 对上层的抽象, 底层通过禁止特定重排序 + 内存屏障实现。
+
+	7. 内存屏障 给出动态图 JUC_7_内存屏障_动态图.html
+		- 一类 CPU 指令, 作用: 1) 禁止屏障前后的指令重排序; 2) 强制刷新 store buffer / 处理 invalidate queue, 保证可见性。
+		- JMM 中的四类屏障:
+		    LoadLoad    Load1; LoadLoad; Load2      保证 Load1 先于 Load2 读取
+		    StoreStore  Store1; StoreStore; Store2  保证 Store1 先于 Store2 对其他处理器可见
+		    LoadStore   Load1; LoadStore; Store2    保证 Load1 先于 Store2
+		    StoreLoad   Store1; StoreLoad; Load2    保证 Store1 对所有处理器可见后再执行 Load2, 开销最大, 兼具其它三种效果
+		- 四类屏障举例 (每个例子都是: 没有屏障会出什么错, 硬件上为什么会错, 屏障怎么解决):
+		  初始值: data = 0; ready = 0; x = 0; y = 0; r1 = 0; r2 = 0;
+
+		  ① StoreStore: 防止 "后写的先被别人看到"
+		      Thread A                     Thread B
+		      data = 42;                   if (ready == 1)
+		      ready = 1;                       print(data);
+		    · 错误结果: B 看到 ready == 1, 却打印出 data = 0。
+		    · 原因: 两个写都进了 Store Buffer。在 ARM / POWER 等弱内存模型的 CPU 上, Store Buffer 不保证先进先出,
+		      ready 所在的缓存行先拿到了独占权, 于是 ready = 1 先刷出, data = 42 还留在 Store Buffer 里。
+		    · 屏障: data = 42; StoreStore; ready = 1;
+		      保证 data = 42 先于 ready = 1 对其他 CPU 可见。
+		    · x86 的 Store Buffer 是先进先出的, 不会发生这种重排, 所以 x86 上 StoreStore 是空操作。
+		    · Java 中的对应: volatile 写之前插 StoreStore; final 字段在构造函数中赋值后、对象引用发布前也插 StoreStore,
+		      所以别的线程拿到对象引用时, final 字段一定已经初始化。
+
+		  ② LoadLoad: 防止 "后读的读到更旧的值"
+		      还是上面的例子, 这次问题出在读的一方 (B):
+		      r1 = ready;     // 读到 1 (新值)
+		      r2 = data;      // 读到 0 (旧值)
+		    · 错误结果: B 先读到了 ready 的新值, 却读到了 data 的旧值。
+		    · 原因: A 写 data 时发来的 "data 失效" 消息还在 B 的 Invalidate Queue 里没处理,
+		      B 缓存中的 data 仍然是旧的 0, 被直接读出; 或者 CPU 乱序执行, 提前读取了 data。
+		    · 屏障: r1 = ready; LoadLoad; r2 = data;
+		      执行后面的读之前, 必须先处理完 Invalidate Queue, 保证读到的不会比前一个读更旧。
+		    · Java 中的对应: volatile 读之后插 LoadLoad, 所以 "读到 ready == 1 之后再读 data" 一定能读到 42。
+		    · 例 ① 和例 ② 必须配对使用: 写的一方用 StoreStore, 读的一方用 LoadLoad, 缺一个都可能读到 data = 0。
+
+		  ③ LoadStore: 防止 "后面的写跑到前面的读之前"
+		      Thread A                     Thread B
+		      r1 = x;                      r2 = y;
+		      y = 1;                       x = 1;
+		    · 错误结果: r1 == 1 且 r2 == 1, 两个线程都读到了对方 "之后才写" 的值, 看起来像时间倒流。
+		    · 原因: r1 = x 缓存未命中, 要等较长时间; CPU 先把 y = 1 写了出去。B 那边同理。
+		      即读还没完成, 后面的写已经对其他 CPU 可见了。
+		    · 屏障: r1 = x; LoadStore; y = 1;
+		      保证读完成之后, 后面的写才能对外可见。
+		    · 只有 ARM / POWER 这类弱内存模型会出现, x86 不会, 所以 x86 上 LoadStore 是空操作。
+		    · Java 中的对应: volatile 读之后插 LoadStore。例如 if (initialized) { config.value = 1; },
+		      保证对 config 的写不会排到读 initialized 之前。
+
+		  ④ StoreLoad: 防止 "先写后读" 被重排成 "先读后写"
+		      Thread A                     Thread B
+		      x = 1;                       y = 1;
+		      r1 = y;                      r2 = x;
+		    · 错误结果: r1 == 0 且 r2 == 0。
+		    · 原因: x = 1 和 y = 1 都还在各自的 Store Buffer 里, 两个读都从缓存读到了旧值 (见下面的图示 2)。
+		    · 屏障: x = 1; StoreLoad; r1 = y;
+		      必须等 Store Buffer 清空 (写已经全局可见), 才能执行后面的读。要等待, 所以开销最大。
+		    · x86 唯一会发生的就是这种重排, 所以 x86 上只有 StoreLoad 需要真正的指令 (lock addl / mfence)。
+		    · 实际危害: Dekker / Peterson 互斥算法是 "先举手 (写 flag), 再看对方有没有举手 (读对方的 flag)",
+		      没有 StoreLoad 时两个线程都可能看到对方没举手, 同时进入临界区。
+		      Java 中 volatile 写之后插 StoreLoad, 就是为了保证 volatile 写之后的 volatile 读一定能看到最新值。
+
+		  ⑤ 小结: 重排的硬件来源和各平台情况
+		      屏障        对应的硬件原因                         x86 (TSO)        ARM / POWER
+		      StoreStore  Store Buffer 不是先进先出               不会重排, 空操作  会重排, 需要屏障
+		      LoadLoad    Invalidate Queue 未处理 / 乱序读         不会重排, 空操作  会重排, 需要屏障
+		      LoadStore   读未完成时后面的写先可见                 不会重排, 空操作  会重排, 需要屏障
+		      StoreLoad   Store Buffer 中的写还没刷出              会重排, 需要屏障  会重排, 需要屏障
+		      JMM 统一按四类屏障描述, 由 JIT 根据 CPU 翻译成具体指令, 不需要的就省略。
+
+		- 补充: 有没有 Load Buffer?
+		    · 有。现代 CPU (如 Intel) 的内存访问单元里同时有 Load Buffer 和 Store Buffer, Intel 统称为 MOB (Memory Order Buffer)。
+		    · 作用: CPU 乱序执行时, 一条读指令发出后可能要等缓存未命中, Load Buffer 记录这些 "已经发出、还没完成" 的读,
+		      让读可以提前、并行执行。它不暂存要给别人看的数据, 所以不会造成 "写对别的核不可见"。
+		      这也是讲内存屏障时通常只画 Store Buffer 和 Invalidate Queue 的原因。
+		    · 和重排的关系: Load Buffer 支持读乱序执行, 由此可能带来 LoadLoad 和 LoadStore 重排:
+		        x86:         读也会乱序执行, 但 Load Buffer 会监听总线上的失效消息。如果一个提前执行的读在提交前,
+		                     发现它读的缓存行被别的核改了, CPU 会清空流水线, 重新执行这条读 (Intel 称为 memory ordering machine clear)。
+		                     所以从外部看, 读的顺序始终和程序顺序一致, x86 不会发生 LoadLoad / LoadStore 重排。
+		        ARM / POWER: 没有这种检查, 读可以真的乱序完成, 所以会发生 LoadLoad / LoadStore 重排, 需要真正的屏障指令。
+		    · 容易混淆: 例 ③ 那种 "两个线程都读到对方之后才写的值" 的测试, 在内存模型文献中叫 Load Buffering (LB) 测试。
+		      这个名字只是描述现象 (读被缓冲着还没完成, 后面的写先出去了), 并不是说 Load Buffer 这个硬件导致了问题。
+		    · 三个结构对比:
+		        结构              作用                                  导致的问题                           对应的屏障
+		        Store Buffer      暂存写, 不等别的核确认就继续执行       写暂时对别的核不可见                 StoreLoad (非先进先出的 CPU 上还有 StoreStore)
+		        Invalidate Queue  暂存收到的失效消息, 稍后再处理         本核读到缓存中的旧值                 LoadLoad
+		        Load Buffer       跟踪还没完成的读, 支持读乱序执行       ARM/POWER 上读可以乱序完成;          LoadLoad、LoadStore (只在弱内存模型上需要)
+		                                                                x86 检测到冲突后会重新执行这条读
+
+		- volatile 的插入策略 (保守策略):
+		    volatile 写: 前面插 StoreStore, 后面插 StoreLoad
+		    volatile 读: 后面插 LoadLoad 和 LoadStore
+		- x86 是强内存模型 (TSO), 只会发生 Store-Load 重排序, 所以只需要 StoreLoad 屏障,
+		  HotSpot 在 volatile 写后用 lock addl $0x0,(%rsp) 实现。
+		- 图示 1: 为什么需要屏障 (CPU 结构)
+
+		      +---------- CPU 0 ----------+          +---------- CPU 1 ----------+
+		      |  Execution Unit           |          |  Execution Unit           |
+		      |       | write      ^ read |          |       | write      ^ read |
+		      |       v            |      |          |       v            |      |
+		      |  +---------+  +---------+ |          |  +---------+  +---------+ |
+		      |  |  Store  |  |  Load   | |          |  |  Store  |  |  Load   | |
+		      |  |  Buffer |  |  Buffer | |          |  |  Buffer |  |  Buffer | |
+		      |  +---------+  +---------+ |          |  +---------+  +---------+ |
+		      |       |            ^      |          |       |            ^      |
+		      |       v            |      |          |       v            |      |
+		      |  +---------------------+  |          |  +---------------------+  |
+		      |  |    Cache (MESI)     |  |          |  |    Cache (MESI)     |  |
+		      |  +---------------------+  |          |  +---------------------+  |
+		      |             ^             |          |             ^             |
+		      |  +---------------------+  |          |  +---------------------+  |
+		      |  |  Invalidate Queue   |  |          |  |  Invalidate Queue   |  |
+		      |  +---------------------+  |          |  +---------------------+  |
+		      +-------------^-------------+          +-------------^-------------+
+		                    |                                      |
+		      ==============+======== Bus (snooping) ==============+=============
+		                                        |
+		                                   Main Memory
+
+		      · 写操作停在 Store Buffer 中 → 其他 CPU 看不到 (写屏障 StoreStore / StoreLoad 负责清空它)
+		      · 失效请求停在 Invalidate Queue 中 → 本 CPU 读到旧值 (读屏障 LoadLoad 负责处理完它)
+		      · 读请求记录在 Load Buffer 中, 可以乱序执行 → ARM / POWER 上读可能乱序完成 (LoadLoad / LoadStore 负责);
+		        x86 发现冲突会重新执行这条读, 所以不会乱序 (详见上面的 "补充: 有没有 Load Buffer?")
+
+		- 图示 2: 没有屏障时的 Store-Load 重排 (x86 上也会发生)
+
+		      初始 x = 0, y = 0
+		          Thread 1 (CPU 0)         Thread 2 (CPU 1)
+		      (1) x = 1;                   (3) y = 1;
+		      (2) r1 = y;                  (4) r2 = x;
+
+		      (1) 写入 CPU 0 的 Store Buffer, 还没进缓存; (2) 从缓存读到 y = 0
+		      (3) 写入 CPU 1 的 Store Buffer, 还没进缓存; (4) 从缓存读到 x = 0
+		      结果可能是 r1 = 0 且 r2 = 0, 看起来就像 (2) 跑到了 (1) 前面。
+		      在 (1) 与 (2)、(3) 与 (4) 之间插入 StoreLoad 屏障 (例如把 x、y 声明为 volatile) 后, 这个结果就不可能出现。
+
+		- 图示 3: volatile 写的屏障位置
+
+		      普通读 / 普通写
+		      ----------------- StoreStore   上面的普通写, 必须先于 volatile 写对其他线程可见
+		      volatile 写
+		      ----------------- StoreLoad    volatile 写必须对所有线程可见后, 才能执行下面的读写
+		      后续的 volatile 读 / 写
+
+		- 图示 4: volatile 读的屏障位置
+
+		      volatile 读
+		      ----------------- LoadLoad     下面的普通读不能重排到 volatile 读之前
+		      ----------------- LoadStore    下面的普通写不能重排到 volatile 读之前
+		      普通读 / 普通写
+
+		- 图示 5: 结合起来看 volatile 的可见性 (典型的 "标志位" 用法)
+
+		      Thread A (write)                     Thread B (read)
+		      data = 42;
+		      ----- StoreStore -----
+		      ready = true;
+		      ----- StoreLoad ------     ------>   if (ready) {
+		                                           ----- LoadLoad / LoadStore -----
+		                                               print(data);
+		                                           }
+
+		      data = 42 是普通写, ready 是 volatile 变量; 线程 B 读到 ready == true 时, 打印的 data 一定是 42。
+
+		      happens-before 链: data = 42  →(程序顺序) ready = true  →(volatile 规则) 读 ready  →(程序顺序) 读 data
+		      没有 volatile 时, data = 42 可能被重排到 ready = true 之后, 线程 B 就可能打印出 0。
+
+	8. 指令重排 给出动态图 JUC_8_指令重排_动态图.html
+		- 为了提高性能, 在不改变单线程执行结果的前提下, 改变指令的执行顺序。
+		- 三个来源: 编译器优化重排 → 处理器指令级并行重排 → 内存系统重排 (store buffer 导致看起来乱序)。
+		- 单线程遵守 as-if-serial 语义 (有数据依赖的不会重排), 但多线程下会导致问题。
+		- 经典例子: 双重检查锁 (DCL) 单例。
+		    instance = new Singleton() 分 3 步: 1. 分配内存 2. 初始化对象 3. 引用指向内存
+		    2 和 3 可能被重排成 1 → 3 → 2, 另一个线程在第一次判断时看到 instance != null,
+		    拿到的却是一个没初始化完成的对象。
+		    解决: instance 加 volatile, 禁止重排序。
+		- 禁止重排的手段: volatile、synchronized、final (构造函数内的 final 字段写不会逸出)、Unsafe/VarHandle 的屏障方法。
+
+	9. CLH队列 给出动态图 JUC_9_CLH队列_动态图.html
+		- CLH 锁 (Craig、Landin、Hagersten 三人提出) 是一种基于链表的公平自旋锁:
+		    · 每个线程申请锁时创建一个节点, 通过 CAS 把自己设为 tail, 拿到前驱节点;
+		    · 线程只在 "前驱节点的 locked 标志" 上自旋, 前驱释放锁时把 locked 置为 false, 当前线程就获得锁。
+		- 优点: 公平 (FIFO); 每个线程只自旋在自己前驱的变量上 (本地自旋), 避免所有线程争抢同一个变量, 减少缓存一致性流量。
+		- AQS 中的 CLH 变体:
+		    · 从隐式单向链表改成显式双向链表: prev 用于处理取消的节点, next 用于唤醒后继;
+		    · 不再纯自旋, 而是在前驱 waitStatus 为 SIGNAL 后 park 挂起, 由前驱释放时 unpark 唤醒;
+		    · head 是一个哑节点, 代表当前持有锁的线程。
+
+	10. 线程阀 给出动态图 JUC_10_线程阀_动态图.html
+		- 线程阀指控制多个线程执行节奏的同步工具类 (闭锁、栅栏、信号量等), 都在 JUC 中:
+		    · CountDownLatch (闭锁): 计数器减到 0 前 await 的线程都阻塞; 一次性, 不能重置。
+		      场景: 主线程等待 N 个子任务完成。基于 AQS 共享模式, state = 计数值。
+		    · CyclicBarrier (栅栏): N 个线程互相等待, 都到达屏障点后一起继续执行, 可重复使用, 可指定到达后执行的 barrierAction。
+		      基于 ReentrantLock + Condition。
+		    · Semaphore (信号量): 控制同时访问资源的线程数 (限流), acquire 获取许可、release 归还。基于 AQS 共享模式。
+		    · Exchanger: 两个线程在同步点交换数据。
+		    · Phaser (JDK7): 可动态调整参与者数量的多阶段栅栏。
+		- CountDownLatch vs CyclicBarrier: 前者是一个/多个线程等其他线程 (计数由别人减), 一次性;
+		  后者是一组线程互相等待, 可循环使用。
+
+	11. synchronized 关键字 锁升级过程 给出动态图 JUC_11_synchronized锁升级_动态图.html
+		- 底层: 代码块使用 monitorenter / monitorexit 指令, 方法使用 ACC_SYNCHRONIZED 标志; 锁状态记录在对象头的 Mark Word 中。
+		- 升级路径: 无锁 → 偏向锁 → 轻量级锁 → 重量级锁, 一般不降级。
+		    · 偏向锁: 第一个线程获取锁时把线程 ID CAS 写进 Mark Word, 之后该线程再进入时只需比较线程 ID, 不需要 CAS。
+		      适用于基本只有一个线程访问的场景。
+		      出现其它线程竞争 → 在安全点撤销偏向锁, 升级为轻量级锁。
+		      (调用过 hashCode() 的对象无法偏向, 因为 Mark Word 没有位置同时存线程 ID 和 hashCode。)
+		    · 轻量级锁: 线程在自己栈帧中创建 Lock Record, 把 Mark Word 复制过去 (Displaced Mark Word),
+		      再 CAS 把对象 Mark Word 替换为指向 Lock Record 的指针。适用于线程交替执行、竞争不激烈的场景。
+		      CAS 失败会自适应自旋, 自旋仍失败 (或者竞争线程较多) → 膨胀为重量级锁。
+		    · 重量级锁: Mark Word 指向 ObjectMonitor (_owner、_EntryList、_WaitSet、_recursions),
+		      未抢到锁的线程进入阻塞, 依赖操作系统 mutex, 存在用户态/内核态切换, 开销最大。
+		- 版本变化: JDK15 (JEP 374) 默认禁用偏向锁并标记为废弃 (撤销成本高, 现代应用收益小),
+		  后续版本已移除, 所以新版本 JDK 中实际是 无锁 → 轻量级锁 → 重量级锁。
+		- 其它优化: 锁消除 (逃逸分析发现对象不会逃逸)、锁粗化 (合并相邻的同步块)。
+
+JVM相关:
+	1. 运行时内存结构
+		- 线程私有:
+		    · 程序计数器: 当前线程执行的字节码行号 (执行 native 方法时为空);
+		    · 虚拟机栈: 每个方法对应一个栈帧, 包含局部变量表、操作数栈、动态链接、方法返回地址;
+		    · 本地方法栈: 为 native 方法服务 (HotSpot 中和虚拟机栈合二为一)。
+		- 线程共享:
+		    · 堆: 存放对象实例和数组, GC 的主要区域, 分为新生代 (Eden、S0、S1, 默认 8:1:1) 和老年代;
+		      JDK7 起字符串常量池、静态变量也移到了堆中;
+		    · 方法区: 存放类信息、运行时常量池、JIT 编译后的代码等。
+		      JDK7 及以前用永久代实现 (在堆中), JDK8 改为元空间 (Metaspace, 使用本地内存)。
+		- 不属于运行时数据区但常被问到: 直接内存 (NIO 的 DirectByteBuffer 使用的堆外内存)。
+
+	2. 什么区不会出现 OOM ? 什么区会出现? 举例
+		- 不会 OOM: 程序计数器, 是 JVM 规范中唯一没有规定任何 OutOfMemoryError 的区域 (只存一个行号, 大小固定)。
+		- 会 OOM:
+		    · 堆: java.lang.OutOfMemoryError: Java heap space
+		      例: 无限往 List 中添加对象、一次性查询大量数据到内存、内存泄漏 (静态集合只增不删)。
+		      还有 GC overhead limit exceeded: 98% 的时间在 GC 却只回收不到 2% 的内存。
+		    · 元空间: OutOfMemoryError: Metaspace
+		      例: CGLIB / 动态代理 / 反射 / Groovy 脚本 无限生成类, 类加载器泄漏导致类无法卸载。
+		    · 虚拟机栈 / 本地方法栈: 递归太深 → StackOverflowError (栈深度超出);
+		      创建线程过多无法再分配栈 → OutOfMemoryError: unable to create new native thread。
+		    · 直接内存: OutOfMemoryError: Direct buffer memory
+		      例: 不断 ByteBuffer.allocateDirect, Netty 堆外内存泄漏 (ByteBuf 没有 release)。
+
+	3. GCRoots 是什么? 是干什么的? 给出动态图 JVM_3_GCRoots_动态图.html
+		- 是什么: 可达性分析算法的起点集合, 是一组一定存活的对象引用。
+		- 干什么: GC 从 GC Roots 出发沿引用链向下搜索, 能到达的对象是存活对象; 到达不了的对象判定为可回收。
+		  这样能解决引用计数法无法处理的循环引用问题。
+		- 哪些对象可以作为 GC Roots:
+		    · 虚拟机栈 (栈帧的局部变量表) 中引用的对象, 例如方法参数、局部变量;
+		    · 方法区中类静态属性引用的对象;
+		    · 方法区中常量引用的对象, 例如字符串常量池中的引用;
+		    · 本地方法栈中 JNI 引用的对象;
+		    · 被 synchronized 持有的对象;
+		    · JVM 内部引用: 基本类型对应的 Class 对象、常驻异常对象 (如 NullPointerException、OOM)、系统类加载器;
+		    · 局部回收时 (如 Young GC), 老年代对新生代的跨代引用 (通过记忆集 / 卡表记录) 也会临时作为 GC Roots。
+		- 补充: 不可达的对象并不是立刻死亡, 如果覆盖了 finalize() 且没执行过, 会被放入 F-Queue 中执行一次, 有一次自救机会 (JDK9 起 finalize 已废弃)。
+
+	4. OOP-Klass 二分模型: 给出动态图 JVM_4_OOP-Klass模型_动态图.html
+		- 是什么: HotSpot (用 C++ 实现) 用两部分来表示一个 Java 对象:
+		    · OOP (Ordinary Object Pointer, 普通对象指针): 表示对象实例, 存放 对象头 + 实例字段, 分配在堆中;
+		    · Klass: 表示类的元数据, 包含字段布局、方法、虚方法表 (vtable / itable)、常量池、父类、访问标志等,
+		      存放在方法区 (JDK8+ 是元空间)。
+		  一个类只有一个 Klass, 这个类的所有实例 (OOP) 都通过对象头中的类型指针指向同一个 Klass。
+		- 为什么要拆成两部分:
+		    · C++ 中含有虚函数的对象, 每个对象都要带一个虚表指针 (vptr)。如果 Java 对象直接映射成这样的 C++ 对象,
+		      每个实例都会多出这部分开销, 而且对象布局也不受控制;
+		    · 拆分后, 实例 (OOP) 只保留自己的数据和一个类型指针, 方法分派等行为信息只在 Klass 中存一份, 对象更小;
+		    · 也就是: 数据 (OOP, 每个对象一份) 和 描述 (Klass, 每个类一份) 分离。
+		- OOP 体系 (JDK8 源码 oopsHierarchy.hpp):
+		    oopDesc                  所有对象的基类, 字段就是对象头: _mark (Mark Word) + _metadata (Klass 指针, 可压缩为 4 字节)
+		     ├─ instanceOopDesc      普通 Java 对象实例
+		     └─ arrayOopDesc         数组对象, 对象头中多了数组长度
+		         ├─ objArrayOopDesc  引用类型数组, 例如 String[]
+		         └─ typeArrayOopDesc 基本类型数组, 例如 int[]
+		    (JDK8 中 Mark Word 也是一个 oop 类型 markOopDesc, JDK13 起改为普通的 markWord 类)
+		- Klass 体系:
+		    Klass
+		     ├─ InstanceKlass                  普通 Java 类的元数据
+		     │   ├─ InstanceMirrorKlass        java.lang.Class 对应的 Klass
+		     │   ├─ InstanceRefKlass           java.lang.ref.Reference 及其子类 (软/弱/虚引用)
+		     │   └─ InstanceClassLoaderKlass   类加载器
+		     └─ ArrayKlass
+		         ├─ ObjArrayKlass              引用类型数组的元数据
+		         └─ TypeArrayKlass             基本类型数组的元数据
+		- 和 java.lang.Class 的关系:
+		    · Klass 是 JVM 内部的 C++ 对象, Java 代码无法直接访问;
+		    · 加载类时, JVM 会同时在堆中创建一个 java.lang.Class 对象 (称为 mirror, 镜像),
+		      InstanceKlass 的 _java_mirror 字段指向它, Class 对象内部也有字段反向指向 Klass;
+		    · Java 代码中的 obj.getClass()、反射, 拿到的都是这个 mirror;
+		    · JDK7 起, 类的静态变量存放在这个 Class 对象中 (所以静态变量在堆中, 而不在方法区)。
+		- 图示: Person p = new Person();
+
+		      Stack                Heap                                  Metaspace
+		      +----------+         +----------------------+
+		      | p -------|-------->| instanceOop (Person) |
+		      +----------+         |  Mark Word           |
+		                           |  Klass Pointer ------|------------> +------------------------+
+		                           |  name, age (fields)  |              | InstanceKlass (Person) |
+		                           +----------------------+              |  fields / methods      |
+		                                                                 |  vtable / itable       |
+		                           +----------------------+              |  constant pool         |
+		                           | java.lang.Class      |<-------------|  _java_mirror          |
+		                           | (mirror of Person)   |              +------------------------+
+		                           |  static fields       |                          ^
+		                           |  klass --------------|--------------------------+
+		                           +----------------------+
+
+		- 结合起来看几个常见操作:
+		    · new Person(): 类未加载则先加载, 在元空间创建 InstanceKlass、在堆中创建 Class 镜像;
+		      然后在堆中分配 instanceOop, 设置 Mark Word, 类型指针指向 InstanceKlass, 字段赋零值, 再执行构造方法。
+		    · p.say(): 通过 p 找到 OOP → 通过对象头中的类型指针找到 InstanceKlass → 在 vtable 中找到实际要调用的方法,
+		      这就是多态 (动态分派) 在 JVM 中的实现。
+		    · p.getClass(): OOP → Klass → _java_mirror, 返回 Class 对象。
+		- 和对象头的联系: 第 6 题中对象头里的 "类型指针" 就是 OOP 指向 Klass 的指针;
+		  开启 -XX:+UseCompressedClassPointers (默认开启) 时占 4 字节, Klass 放在单独的压缩类空间 (Compressed Class Space, 默认 1G) 中。
+
+	5. TLAB 给出动态图 JVM_5_TLAB_动态图.html
+		- Thread Local Allocation Buffer, 线程本地分配缓冲区。
+		- 问题: 堆是线程共享的, 多线程同时在 Eden 中分配对象需要同步 (CAS + 失败重试), 并发高时竞争激烈。
+		- 方案: JVM 在 Eden 中为每个线程预先划分一小块私有区域, 线程优先在自己的 TLAB 中分配对象,
+		  只需要移动指针 (指针碰撞), 不需要加锁。
+		- TLAB 用完时: 剩余空间小于最大浪费阈值 (refill_waste) → 废弃当前 TLAB, 用 CAS 从 Eden 申请一块新的 TLAB;
+		  否则 (剩余空间还很多) 这个对象直接在 Eden 共享区用 CAS 分配, 保留当前 TLAB。
+		- 注意: TLAB 只是分配时私有, 分配出来的对象依然是所有线程都可以访问的。
+		- 参数: -XX:+UseTLAB (默认开启), 默认大小约为 Eden 的 1%, 会根据线程的分配情况自适应调整。
+		- 对象分配顺序: 栈上分配 (逃逸分析 + 标量替换) → TLAB → Eden 共享区 → (大对象) 老年代。
+
+	6. 对象头 和 MarkWord 给出动态图 JVM_6_MarkWord_动态图.html
+		- 对象内存布局: 对象头 + 实例数据 + 对齐填充 (对象大小必须是 8 字节的整数倍)。
+		- 对象头 (64 位 JVM):
+		    · Mark Word: 8 字节, 存储运行时数据;
+		    · 类型指针 (Klass Pointer): 指向方法区中的类元数据, 开启指针压缩时 4 字节 (默认), 否则 8 字节;
+		    · 数组长度: 只有数组对象才有, 4 字节。
+		- Mark Word 根据锁状态复用, 最后 2 位是锁标志位:
+		    状态       内容 (64 位)                                                     偏向位  锁标志
+		    无锁       unused:25 | hashcode:31 | unused:1 | age:4                       0       01
+		    偏向锁     threadId:54 | epoch:2 | unused:1 | age:4                         1       01
+		    轻量级锁   指向栈中 Lock Record 的指针:62                                    -       00
+		    重量级锁   指向 ObjectMonitor 的指针:62                                     -       10
+		    GC 标记    空                                                               -       11
+		- 推论:
+		    · 分代年龄只有 4 位, 所以最大是 15, -XX:MaxTenuringThreshold 不能超过 15;
+		    · 无锁状态才有位置存 hashCode, 所以计算过 hashCode 的对象不能再偏向;
+		      轻量级/重量级锁时 hashCode 保存在 Lock Record / ObjectMonitor 中;
+		    · new Object() 占 16 字节: Mark Word 8 + 类型指针 4 + 对齐填充 4 (可用 JOL 工具验证)。
+
+Kafka:
+	1. 高水位线 和 低水位线 给出动态图 Kafka_1_高低水位_动态图.html
+		- 先说 LEO (Log End Offset): 每个副本日志中下一条待写入消息的 offset, 即最后一条消息的 offset + 1。
+		- 高水位 HW (High Watermark):
+		    · HW = ISR 中所有副本 LEO 的最小值;
+		    · HW 之前的消息才算 "已提交", 消费者只能拉取到 HW 之前的消息, 保证消费者看到的数据在 Leader 切换后依然存在;
+		    · Leader 根据 Follower 的 fetch 请求更新 HW, Follower 在下一次 fetch 响应中才拿到新的 HW, 有一轮延迟。
+		    · 只依赖 HW 截断日志可能导致数据丢失 / 副本不一致, 所以 0.11 版本引入了 Leader Epoch 来做截断判断。
+		- 低水位 LW (Low Watermark):
+		    · AR 集合中所有副本 logStartOffset 的最小值;
+		    · 表示日志的起始位置, 小于 LW 的消息已被删除 (日志清理或 DeleteRecords 请求), 不可再被消费。
+		- 关系图:
+		                        LW                 HW                      LEO
+		    已经删除数据, 不可消费 |  可消费的已提交消息 |  未提交 (ISR 未全部同步) |
+		- 配合: 生产者 acks=all + min.insync.replicas >= 2, 才能保证消息写入 ISR 后不丢失。
+
+	2. 单播, 多播, 组播 相关概念 给出动态图 Kafka_2_单播多播_动态图.html
+		- Kafka 本身没有这些协议层概念, 而是通过消费者组 (Consumer Group) 实现两种消息模型:
+		    · 单播 (点对点 / 队列模型): 所有消费者在同一个消费组中, 一个分区同一时刻只能被组内一个消费者消费,
+		      所以一条消息只会被组内的一个消费者处理。
+		    · 多播 / 组播 (发布-订阅模型): 多个消费组订阅同一个 topic, 每个消费组都会收到全量消息,
+		      即一条消息被投递给每个组, 每个组内再由一个消费者处理。
+		    · 广播: 每个消费者使用不同的 group.id, 每个消费者都能收到全部消息。
+		- 关键点: 组内消费者数 > 分区数时, 多出来的消费者会空闲, 所以分区数决定了一个组的最大消费并行度。
+		- 每个消费组独立维护自己的消费位移 (__consumer_offsets), 互不影响。
+
+	3. 再均衡 给出动态图 Kafka_3_再均衡_动态图.html
+		- Rebalance: 消费组内重新分配分区和消费者对应关系的过程。
+		- 触发条件:
+		    · 组成员变化: 新消费者加入、消费者主动退出、消费者崩溃 (超过 session.timeout.ms 没有心跳),
+		      或两次 poll 间隔超过 max.poll.interval.ms 被踢出 (这是最常见的意外原因, 处理太慢);
+		    · 订阅的 topic 的分区数增加;
+		    · 订阅的 topic 变化 (正则订阅匹配到新 topic)。
+		- 过程 (由 Broker 端的 Group Coordinator 协调):
+		    1. 消费者发送 JoinGroup, Coordinator 选出一个消费者作为 Leader;
+		    2. Leader 消费者按分配策略 (Range / RoundRobin / Sticky / CooperativeSticky) 计算分配方案;
+		    3. 通过 SyncGroup 把方案下发给所有消费者。
+		- 危害:
+		    · 传统 Eager 协议下是 Stop The World, 所有消费者先放弃全部分区, 整个组停止消费;
+		    · 位移没来得及提交 → 重复消费;
+		    · 频繁 rebalance 导致消费能力严重下降。
+		- 避免 / 优化:
+		    · 合理设置 session.timeout.ms 和 heartbeat.interval.ms (一般心跳为会话超时的 1/3);
+		    · 根据业务处理耗时调大 max.poll.interval.ms 或调小 max.poll.records;
+		    · 静态成员 group.instance.id (2.3+): 消费者重启时在会话超时内回来不会触发 rebalance;
+		    · 使用 CooperativeStickyAssignor 增量再均衡 (2.4+), 只移动必要的分区, 其它分区继续消费;
+		    · 在 ConsumerRebalanceListener.onPartitionsRevoked 中提交位移, 并保证消费逻辑幂等;
+		    · Kafka 4.0 起正式提供新消费者组协议 (KIP-848), 分配逻辑移到服务端, 增量进行, 不再需要全组同步屏障。
+
+Zookeeper:
+	1. 节点类型 给出动态图 ZK_1_节点类型_动态图.html
+		- 持久节点 (PERSISTENT): 创建后一直存在, 直到被主动删除。
+		- 持久顺序节点 (PERSISTENT_SEQUENTIAL): 持久节点, 名称后自动追加一个单调递增的 10 位序号。
+		- 临时节点 (EPHEMERAL): 生命周期与客户端会话绑定, 会话结束 (超时或关闭) 后自动删除; 临时节点不能有子节点。
+		- 临时顺序节点 (EPHEMERAL_SEQUENTIAL): 临时节点 + 自动递增序号。
+		- 3.5+ 新增:
+		    · 容器节点 (CONTAINER): 最后一个子节点被删除后, 容器节点会被自动删除 (适合锁、选举的父节点);
+		    · TTL 节点 (PERSISTENT_WITH_TTL): 超过 TTL 且没有子节点时自动删除, 需要开启 zookeeper.extendedTypesEnabled=true。
+		- 典型应用:
+		    · 临时节点: 服务注册与发现、心跳检测 (服务宕机节点自动消失);
+		    · 临时顺序节点: 分布式锁 (序号最小的获得锁, 其它节点只 watch 自己的前一个节点, 避免羊群效应)、Leader 选举;
+		    · 持久节点: 配置中心。
+
+	2. Observer 节点作用; 参与选举和投票吗? 给出动态图 ZK_2_Observer_动态图.html
+		- 结论: 只观察, 不投票 (Observer 就是"观察者")。
+		    · 能做: 同步 Leader 的数据, 处理客户端的读请求, 写请求转发给 Leader;
+		    · 不做: 不参与 Leader 选举 (不投票, 也不能被选为 Leader), 也不参与写操作的过半 ACK 确认 (只接收 INFORM 消息)。
+		- ZK 集群三种角色:
+		    · Leader: 处理写请求 (事务请求), 发起提案, 负责集群调度;
+		    · Follower: 处理读请求, 转发写请求, 参与选举投票和写提案的投票;
+		    · Observer: 处理读请求, 转发写请求, 不投票。
+		- 作用:
+		    · 扩展读能力而不影响写性能: 投票的节点越多, 写操作需要等待的 "过半" 确认就越慢、选举也越慢;
+		      Observer 不投票, 增加多少都不会拖慢写入和选举;
+		    · 跨机房部署: 在远程机房放 Observer, 提供本地读, 不会因为跨机房网络延迟影响投票;
+		    · Observer 宕机不影响集群可用性 (不计入过半数)。
+		- 配置: 节点自身配置 peerType=observer, 集群配置中写 server.4=host:2888:3888:observer。
+
+Redis:
+	1. Hash环 给出动态图 Redis_1_Hash环_动态图.html
+		- 一致性哈希 (Hash 环):
+		    · 把 0 ~ 2^32-1 的哈希空间首尾相连组成一个环;
+		    · 节点通过 hash(IP 或 名称) 映射到环上;
+		    · key 通过 hash(key) 映射到环上, 沿顺时针找到的第一个节点就是它所在的节点。
+		- 解决的问题: 普通取模 hash(key) % N 在节点数变化时几乎所有 key 都要迁移;
+		  一致性哈希在增减节点时只影响环上相邻的一段数据。
+		- 问题: 节点少时分布不均 → 数据倾斜, 节点宕机时其数据全部压到下一个节点。
+		  解决: 虚拟节点, 每个物理节点映射成多个虚拟节点 (如 150 个) 均匀分布在环上。
+		- 注意: Redis Cluster 没有使用一致性哈希, 而是使用哈希槽:
+		    · 一共 16384 个槽, slot = CRC16(key) % 16384, 每个主节点负责一部分槽;
+		    · 扩缩容就是迁移槽, 可以手动控制;
+		    · 用 {hash tag} 让多个 key 落到同一个槽 (例如 {user:1}:name 和 {user:1}:age), 才能用多 key 命令、事务、Lua;
+		    · 为什么是 16384: 节点间心跳包中用 bitmap 携带槽信息, 16384 位 = 2KB, 大小合适; 官方建议集群节点不超过 1000 个, 16384 个槽足够。
+		- 一致性哈希的使用场景: 客户端分片 (Jedis ShardedJedis)、代理分片 (Twemproxy 的 ketama)。
+
+	2. 分布式锁一定是安全的吗? 为什么? 给出动态图 Redis_2_分布式锁_动态图.html
+		- 正确的基本实现:
+		    加锁: SET lock_key <唯一值, 如 UUID> NX PX 30000   (互斥 + 过期时间要原子设置)
+		    解锁: Lua 脚本 判断 value 是自己的才 DEL               (防止误删别人的锁)
+		- 结论: 不一定安全。Redis 分布式锁存在以下问题:
+
+		  ① 锁过期了, 业务还没执行完 (业务执行慢 / GC 停顿)
+		    时间 →
+		    客户端A: [加锁成功]--------[长时间 GC / 业务慢]-----------------[写共享资源] ✗
+		    Redis :  lock=A  ......(30s 后过期)......  lock=B
+		    客户端B:                                  [加锁成功]--[写共享资源] ✗
+		                                                         ↑ A 和 B 同时认为自己持有锁
+		    缓解: 看门狗续期 (Redisson 默认锁 30s, 每 10s 检查一次, 线程还持有锁就续期到 30s)。
+		    但看门狗解决不了 GC 停顿: A 停顿期间续期线程同样被暂停。
+
+		  ② 主从切换导致锁丢失 (主从复制是异步的)
+		    客户端A: SET lock NX → Master 返回 OK
+		    Master :  lock=A  ——(还没来得及同步到 Slave)——  宕机 ✗
+		    哨兵    :                                       把 Slave 提升为新 Master
+		    新Master:                                       没有 lock
+		    客户端B:                                        SET lock NX → OK   ← A、B 同时持有锁
+
+		    缓解: RedLock 算法, 部署 N (通常 5) 个相互独立的 Redis 主节点:
+		      1. 记录开始时间, 依次向 N 个节点加锁 (每个请求设置较短的超时时间);
+		      2. 在过半节点 (>= N/2+1) 加锁成功, 且总耗时 < 锁有效期, 才算加锁成功;
+		      3. 锁的实际有效时间 = 有效期 - 加锁耗时;
+		      4. 失败时向所有节点发送解锁请求。
+
+		  ③ RedLock 也有争议 (Martin Kleppmann 的批评)
+		    · 依赖时钟: 某个节点时钟跳跃 (如 NTP 调整) 导致锁提前过期, 又可能出现两个客户端同时过半;
+		    · 无法解决进程停顿 / 网络延迟: 客户端在拿到锁之后、访问资源之前发生长时间 GC, 锁已经过期, 问题同 ①;
+		    · 节点崩溃重启后丢失锁 (没有持久化或 fsync 不及时)。
+
+		  ④ 根本解决思路: Fencing Token (栅栏令牌)
+		    客户端A: 获取锁, token=33 ---[GC 停顿]--------------------- 写存储(token=33) → 拒绝 (33 < 34)
+		    客户端B:                 获取锁, token=34 -- 写存储(token=34) → 成功, 存储记录最大 token=34
+		    · 锁服务每次发放一个单调递增的 token, 存储服务拒绝比已见过的 token 更小的请求;
+		    · 业务层的等价方案: 数据库乐观锁 (version)、唯一约束、状态机条件更新 (UPDATE ... WHERE status = 'INIT') 保证幂等。
+
+		- 总结:
+		    · 如果锁只是为了提高效率 (避免重复计算, 偶尔重复执行可以接受), 单节点 Redis 锁 + 看门狗就够了;
+		    · 如果锁是为了正确性 (绝对不能同时执行), 不能只依赖 Redis 锁, 要在资源层面做 fencing / 幂等校验;
+		      或者使用 ZooKeeper / etcd 这种基于共识协议的锁 (临时节点 + 会话), 但它们同样会受到 GC 停顿的影响, 依然需要 fencing。
+
+	3. RedisController 中的几种加锁方式是线程安全的吗? Redisson 真的安全吗? 使用锁最合理的方式
+		代码: src/main/java/com/deepblue/inaction_01_springboot2/chapter_12/controller/RedisController.java
+		- 结论: 两种写法都不能算真正安全。/redis_lock 有明确的并发 bug; /killWithRedisson 用对了 Redisson 的机制, 但写法有坑;
+		  Redisson 本身在单个 Redis 节点上是可靠的, 但遇到主从切换、长时间 GC 停顿时, 依然可能有两个持有者。
+
+		- /redis_lock (setIfAbsent + delete): 不安全
+		    · 加锁 setIfAbsent(KEY, value, 10, SECONDS) 对应 SET NX EX, 是原子的, 没问题;
+		    · 删锁不判断是不是自己的锁: 直接 redisTemplate.delete(KEY), 生成的 UUID 没用上。
+		        A 业务超过 10s → 锁过期 → B 加锁成功 → A 执行完把 B 的锁删掉 → C 又能进来;
+		    · 没有续期: 业务时间不确定时, 10s 可能不够, 锁中途过期;
+		    · delete 不在 finally 中: 业务抛异常时锁不会被释放, 只能等它自己过期;
+		    · if (lockFlag) 自动拆箱: pipeline / 事务中 setIfAbsent 返回 null, 直接 NPE。
+		    · 修正: 解锁用 Lua 脚本, 先比较 value, 相等再删除:
+		        if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end
+		      修正后依然没有续期、不可重入, 自己实现比较麻烦, 所以一般直接用 Redisson。
+
+		- /killWithRedisson (redissonClient.getLock + lock): 机制对, 写法有坑
+		    · Redisson 已经做好的:
+		        加锁 / 解锁都用 Lua 脚本, 原子操作;
+		        锁中记录 UUID:threadId, 只有持有锁的线程才能解锁, 不会误删别人的锁;
+		        可重入: 底层是 hash 结构, field = UUID:threadId, value = 重入次数;
+		        看门狗: 不指定 leaseTime 时, 默认锁 30s (lockWatchdogTimeout), 每 10s 续期一次, 业务再长也不会中途过期;
+		        等待锁时订阅解锁的 channel, 不是空转自旋。
+		    · 代码的问题:
+		        lock.lock() 写在 try 里面: lock() 自己失败 (Redis 连接异常、线程中断) 时, finally 依然调用 unlock(),
+		          抛出 IllegalMonitorStateException, 把原来的异常覆盖掉;
+		        lock != null 的判断没有意义, getLock 不会返回 null;
+		        锁名直接用 productNo, 可能和商品数据的 key 冲突, 应该加前缀, 例如 lock:product:{productNo};
+		        秒杀场景用 lock() 会一直阻塞等待, 请求堆积, 应该用 tryLock(waitTime) 等不到就快速失败;
+		        异常被吞掉, 直接返回 0, 调用方分不清是 "没抢到" 还是 "出错了"。
+
+		- Redisson 真的安全吗? 单节点 + 无长时间停顿时安全, 以下情况依然会出现两个持有者 (详见第 2 题):
+		    · 主从异步复制: A 在 Master 加锁成功, 还没同步到 Slave 就宕机, Slave 升为 Master 后没有这把锁, B 也能加锁;
+		      Sentinel 和 Cluster 模式都有这个问题;
+		    · 长时间 GC 停顿: 看门狗线程在同一个 JVM 中, STW 时一起停下来, 停顿超过 30s 锁过期, B 拿到锁, A 恢复后继续写;
+		    · 网络分区: A 连不上 Redis, 无法续期, 锁过期了, 但 A 的业务还在执行;
+		    · RedLock 也不行: Redisson 新版本已把 RedissonRedLock 标记为废弃, 它依赖时钟, 且没有 fencing token。
+
+		- 使用锁最合理的方式 (RedissonClient API)
+		    · 常用 API:
+		        RLock lock = redissonClient.getLock(name);       可重入锁 (非公平)
+		        RLock lock = redissonClient.getFairLock(name);   公平锁 (按请求顺序获取)
+		        RReadWriteLock rw = redissonClient.getReadWriteLock(name);  读写锁: rw.readLock() / rw.writeLock()
+		        RLock lock = redissonClient.getMultiLock(lock1, lock2);     联锁: 所有锁都加成功才算成功
+
+		        lock.lock()                          阻塞等待, 看门狗自动续期
+		        lock.lock(leaseTime, unit)           阻塞等待, leaseTime 后自动释放, 没有看门狗
+		        lock.lockInterruptibly()             阻塞等待, 可以响应中断
+		        lock.tryLock()                       只尝试一次, 立刻返回
+		        lock.tryLock(waitTime, unit)         最多等待 waitTime, 看门狗自动续期          ← 推荐
+		        lock.tryLock(waitTime, leaseTime, unit)  最多等待 waitTime, leaseTime 后自动释放, 没有看门狗
+		        lock.isHeldByCurrentThread()         当前线程是否持有这把锁
+		        lock.unlock()                        释放锁 (重入几次就要释放几次)
+		        注意: 只要传了 leaseTime (不等于 -1), 看门狗就不会生效。
+
+		    · 推荐写法:
+		        RLock lock = redissonClient.getLock("lock:product:" + productNo);  // 1. 锁名加业务前缀, 粒度细到具体资源
+		        boolean locked;
+		        try {
+		            locked = lock.tryLock(3, TimeUnit.SECONDS);                     // 2. 限时等待, 不传 leaseTime 让看门狗续期
+		        } catch (InterruptedException e) {
+		            Thread.currentThread().interrupt();                             // 3. 恢复中断标记
+		            return 0;
+		        }
+		        if (!locked) {
+		            return 0;                                                       // 4. 没抢到锁快速失败, 返回 "系统繁忙"
+		        }
+		        try {
+		            return productService.minusProduct(productNo, killNum);         // 5. 锁内只放必须互斥的逻辑, 越短越好
+		        } finally {
+		            if (lock.isHeldByCurrentThread()) {                             // 6. 只释放自己持有的锁
+		                lock.unlock();
+		            }
+		        }
+
+		    · 要点:
+		        1. 加锁放在 try 之前, 加锁成功后才进入 try / finally;
+		        2. 用 tryLock(waitTime, unit), 不要无限等待; 不传 leaseTime, 由看门狗续期;
+		           只有能确定业务最长耗时时才用 leaseTime (例如定时任务防重复执行);
+		        3. unlock 放在 finally 中, 并用 isHeldByCurrentThread() 判断, 避免锁已过期或没加上时抛异常;
+		        4. 锁名带业务前缀, 锁住具体资源 (一个商品一把锁), 不要所有请求共用一把锁;
+		        5. 锁内不要做远程调用、发 MQ 等耗时操作, 缩短持锁时间;
+		        6. 和 @Transactional 一起用时, 加锁要放在事务外面 (先加锁再开事务, 事务提交后再释放锁),
+		           否则锁释放了事务还没提交, 下一个线程读到的是旧数据;
+		        7. 正确性要靠数据层兜底, 锁只用来减少冲突。例如扣库存:
+		             UPDATE product SET stock = stock - #{killNum}
+		             WHERE product_no = #{productNo} AND stock >= #{killNum}
+		           返回影响行数为 0 就是库存不足; 这样即使锁失效、两个请求同时进来, 也不会超卖。
+		           其它兜底方式: 乐观锁 version、唯一索引防重复下单、状态机条件更新;
+		        8. 必须强一致时使用 ZooKeeper / etcd 的锁, 并配合 fencing token (ZK 的 zxid、etcd 的 revision)。
+
+		- 同一个文件中另外两处并发问题:
+		    · /set_nickname_zset (滑动窗口限流): zCard 统计和 add 写入是两步操作, 并发请求可能超过 5 次的限制;
+		      同一毫秒的两次请求 member 相同会被去重。应该用 Lua 把 "清理 + 计数 + 添加" 合成一个原子操作, member 用 UUID。
+		    · /redis_watch: setEnableTransactionSupport(true) 修改的是单例 redisTemplate 的全局状态, 会影响所有并发请求;
+		      watch(key) 写在 SessionCallback 外面, 和 multi / exec 不一定是同一个连接, WATCH 可能根本不生效。
+		      应该在 SessionCallback 的 execute() 中依次调用 watch → multi → exec, 并去掉全局开关。
+
+MySQL:
+	1. 回表的概念 给出动态图 MySQL_1_回表_动态图.html
+		- InnoDB 的索引都是 B+ 树:
+		    · 聚簇索引 (主键索引): 叶子节点存储完整的行数据;
+		    · 二级索引 (普通索引): 叶子节点只存储 索引列 + 主键值。
+		- 回表: 通过二级索引查到主键值后, 还需要拿着主键再到聚簇索引中查一次, 才能取到其他列的数据。
+		    例: 表 user(id PK, name, age), 索引 idx_name(name)
+		        SELECT * FROM user WHERE name = 'Tom';
+		        1. 在 idx_name 中找到 name='Tom' → 得到 id=10;
+		        2. 拿 id=10 到聚簇索引中查完整行 → 这一步就是回表。
+		- 回表代价: 每条记录都会产生一次随机 IO, 回表数量多时, 优化器可能直接选择全表扫描。
+		- 优化:
+		    · 覆盖索引: 查询的列都在索引中, 不需要回表 (EXPLAIN 的 Extra 显示 Using index)。
+		      例: 建联合索引 idx_name_age(name, age), 执行 SELECT id, age FROM user WHERE name = 'Tom';
+		    · 索引下推 ICP (5.6+): 在存储引擎层用索引中的其他列先过滤, 减少回表次数 (Extra: Using index condition);
+		    · MRR (Multi-Range Read): 先把主键排序, 再回表, 把随机 IO 变成顺序 IO;
+		    · 避免 SELECT *, 只查需要的列。
+
+	2. 什么情况下会产生 间隙锁? 如何避免 给出动态图 MySQL_2_间隙锁_动态图.html
+		- 间隙锁 (Gap Lock): 锁住索引记录之间的间隙 (开区间), 防止其他事务在间隙中插入数据。
+		  Next-Key Lock = 记录锁 + 间隙锁, 是左开右闭区间, 是 InnoDB 在 RR 级别下加锁的基本单位。
+		- 目的: 在可重复读 (RR) 隔离级别下, 解决当前读的幻读问题。
+		- 产生条件 (前提: RR 隔离级别 + 当前读, 即 SELECT ... FOR UPDATE / LOCK IN SHARE MODE、UPDATE、DELETE):
+		    · 范围查询: WHERE id > 10 AND id < 20, 会锁住范围内的记录和间隙;
+		    · 非唯一索引的等值查询: 会锁住命中记录前后的间隙 (防止插入相同值);
+		    · 唯一索引的等值查询, 但记录不存在: 退化为该值所在的间隙锁;
+		    · 查询条件没有使用索引: 全表扫描, 所有记录和间隙都会被锁住, 效果相当于锁表。
+		  (唯一索引等值查询且记录存在时, Next-Key Lock 退化为记录锁, 不加间隙锁。)
+		- 加锁规则 (8.0 前版本的经典总结):
+		    · 原则 1: 加锁的基本单位是 Next-Key Lock (左开右闭);
+		    · 原则 2: 查找过程中访问到的对象才会加锁;
+		    · 优化 1: 唯一索引等值查询, 命中记录时退化为记录锁;
+		    · 优化 2: 索引等值查询, 向右遍历到最后一个不满足条件的值时, 退化为间隙锁。
+		- 典型问题 - 间隙锁导致死锁:
+		    间隙锁之间不冲突 (两个事务可以同时持有同一个间隙的间隙锁), 只和插入意向锁冲突。
+		    事务A: SELECT * FROM t WHERE id = 15 FOR UPDATE;  -- 15 不存在, 持有间隙锁 (10, 20)
+		    事务B: SELECT * FROM t WHERE id = 16 FOR UPDATE;  -- 同样持有间隙锁 (10, 20), 不冲突
+		    事务A: INSERT INTO t VALUES (15, ...);              -- 被 B 的间隙锁阻塞
+		    事务B: INSERT INTO t VALUES (16, ...);              -- 被 A 的间隙锁阻塞 → 死锁
+		    这正是 "先查后插 (不存在则插入)" 的常见写法。
+		- 如何避免:
+		    · 使用 RC (读已提交) 隔离级别: RC 下不使用间隙锁 (外键检查、唯一键冲突检查除外), 需要配合 binlog_format=ROW;
+		    · 尽量使用主键或唯一索引的等值条件命中已存在记录, 让锁退化为记录锁;
+		    · 确保查询条件走索引, 避免全表扫描锁住所有间隙;
+		    · 缩小范围查询的区间;
+		    · 不要用 "SELECT ... FOR UPDATE 再 INSERT" 的方式判断是否存在,
+		      改用唯一索引 + INSERT ... ON DUPLICATE KEY UPDATE 或 INSERT IGNORE;
+		    · 事务尽量短小, 尽快提交释放锁。
+
+	3. 表锁, 间隙锁, 行锁(记录锁) 给出升级过程 以及降级过程, 以及触发点! 给出动态图 MySQL_3_锁升级和降级_动态图.html
+		- 先纠正一个常见误解: InnoDB 没有 "行锁自动升级为表锁" 的机制。
+		    · SQL Server 中一条语句持有的行锁太多 (约 5000 个) 会自动升级为表锁;
+		    · InnoDB 的行锁按页用 bitmap 存储, 锁住很多行内存占用也很小, 所以不需要升级;
+		    · InnoDB 的表锁只来自: LOCK TABLES、DDL 的 MDL 锁、AUTO-INC 锁, 以及加行锁前自动加的意向锁 (IS / IX)。
+		  所以这里说的 "升级 / 降级" 指的是 锁的范围变大 / 变小, 以及 锁的模式 S → X。
+		- 锁的范围从大到小:
+		    表锁 > 全部行 + 间隙 (没走索引, 效果相当于锁表) > Next-Key 锁 (左开右闭) > 间隙锁 (开区间) > 记录锁 (只锁一行)
+		  RR 下当前读加锁的基本单位是 Next-Key Lock, 然后根据索引和查询条件决定是否 "退化"。
+
+		- 升级 (锁的范围变大) 及触发点:
+		    ① Next-Key → 全部行 + 全部间隙 (相当于锁表)
+		        触发点: 当前读 / UPDATE / DELETE 的条件没走索引, 只能扫描主键索引, 扫描到的每条记录都加 Next-Key, 最后连 supremum 也锁上。
+		          · 条件列没有索引;
+		          · 索引失效: 隐式类型转换 (varchar 列 = 数字)、对索引列用函数或运算 (DATE(ctime) = ...)、LIKE '%abc'、
+		            联合索引不满足最左前缀、OR 有一边没索引;
+		          · 区分度太低, 优化器认为全表扫描更快;
+		          · UPDATE / DELETE 不带 WHERE。
+		        结果: 不相关的行也不能改, 任何位置都不能插入; 但表级其实只有 IX, 不是真正的表锁。
+		        例: t(id PK, name 无索引), UPDATE t SET age = 1 WHERE name = 'Tom';
+		            → (-∞,5] (5,10] (10,20] (20,25] (25,+∞] 全部被锁, 别的事务 UPDATE id = 5 也要等待。
+		    ② 行锁 → 表锁: InnoDB 不会自动发生, 只有显式加表锁时才有:
+		          · LOCK TABLES t READ / WRITE: 加表级 S / X 锁, 和其它事务的 IX / IS 冲突;
+		          · DDL (ALTER TABLE 等) 要加 MDL 写锁: 要等所有持有 MDL 读锁的事务结束 (任何 SELECT / DML 都持有 MDL 读锁, 事务结束才释放),
+		            排队期间后面所有的读写都排在它后面 → 一个长事务 + 一个 DDL 就能让整张表不可用;
+		          · AUTO-INC 锁: innodb_autoinc_lock_mode = 0 时, 或 = 1 时的批量插入 (INSERT ... SELECT), 插入期间持有表级自增锁。
+		        意向锁的作用: 加表锁时只看表上的 IS / IX 就知道有没有行被锁, 不用逐行检查。
+		          兼容性: IS、IX 之间互相兼容; IX 和表级 S、X 冲突; IS 和表级 X 冲突。
+		    ③ 锁模式升级 S → X
+		        触发点: 同一行先 SELECT ... LOCK IN SHARE MODE (8.0 为 FOR SHARE), 再 UPDATE / DELETE。
+		          A、B 都持有 S, 都要升级为 X, 互相等待 → 死锁 (ERROR 1213)。
+		        另一个常见场景: 多个事务 INSERT 同一个唯一键, 冲突时先加 S 锁, 第一个事务回滚后其余事务同时升级为 X → 死锁。
+
+		- 降级 (锁的范围变小, 也叫 "退化") 及触发点:
+		    ① Next-Key → 记录锁
+		        触发点: 唯一索引 (主键 / 唯一键) 等值查询, 且记录存在。
+		        例: SELECT * FROM t WHERE id = 10 FOR UPDATE;  先加 (5,10], 退化为只锁记录 10, 间隙 (5,10) 可以插入。
+		    ② Next-Key → 间隙锁
+		        触发点: 唯一索引等值查询但记录不存在; 或者等值查询向右遍历到第一个不满足条件的值 (非唯一索引也是如此)。
+		        例: SELECT * FROM t WHERE id = 15 FOR UPDATE;  先加 (10,20], 20 不满足条件, 退化为间隙锁 (10,20)。
+		    ③ 不加间隙锁 / 提前释放
+		        触发点: 隔离级别改为 RC。
+		          · RC 不使用间隙锁 (外键检查、唯一键冲突检查除外);
+		          · 没走索引时仍然逐行加锁, 但不满足条件的行在 server 层过滤后立刻释放, 最后只剩匹配行的记录锁。
+		            这是 InnoDB 中唯一一种 "事务没结束就提前放锁" 的情况, RR 下不满足条件的行也会一直锁到事务结束。
+
+		- 注意: 已经持有的锁不会降级。
+		    · X 锁不会变成 S 锁, 范围也不会缩小; InnoDB 遵循两阶段锁, 事务提交或回滚时统一释放;
+		    · 上面说的 "降级" 是指加锁时就退化成更小的范围, 而不是先加大锁、过一会儿再变小。
+
+		- 如何避免锁范围扩大:
+		    · 当前读和 UPDATE / DELETE 一定要走索引, 上线前用 EXPLAIN 确认 type 不是 ALL;
+		    · 尽量用主键或唯一索引等值命中已有记录, 让锁退化为记录锁;
+		    · 可以接受幻读时使用 RC (配合 binlog_format = ROW);
+		    · 要修改的数据读的时候直接用 FOR UPDATE 加 X 锁, 不要 "先 S 后 X";
+		    · DDL 放在低峰期, 执行前查 information_schema.innodb_trx 确认没有长事务, 并设置较小的 lock_wait_timeout;
+		    · 事务尽量短小, 尽快提交。
+
+    3. 表锁, 间隙锁, 行锁(记录锁) 给出升级过程 以及降级过程, 以及触发点! 给出动态图 MySQL_3_锁升级和降级_动态图.html, 顺便给出一个答案
+
+ES:
+	查询的时候 有什么风险? 深度分页什么情况下会出现 10000 的报错, 如何避免? 给出动态图 ES_1_深度分页_动态图.html
+		- 查询风险:
+		    · 深度分页: from + size 越大, 每个分片都要排序 from + size 条, 协调节点要汇总排序 分片数 * (from + size) 条,
+		      CPU、内存、网络开销线性增长, 可能导致协调节点 OOM / 频繁 GC;
+		    · 一次返回过多数据: size 很大或返回大量 _source 字段;
+		    · 昂贵的查询: 前缀为 * 的 wildcard (如 *abc)、regexp、fuzzy、script 查询, 会遍历大量词项;
+		    · 聚合: 对高基数字段做 terms 聚合并设置很大的 size, 嵌套多层聚合, 占用大量内存, 触发熔断器 (circuit_breaking_exception);
+		    · 在 text 字段上排序 / 聚合开启 fielddata, 占用大量堆内存;
+		    · track_total_hits: true 在命中量很大时会变慢;
+		    · 查询涉及的分片过多 (通配符索引 + 过多小分片);
+		    · 慢查询打满 search 线程池, 请求被拒绝 (es_rejected_execution_exception), 影响整个集群。
+		- 什么情况下出现 10000 报错:
+		    · 使用 from + size 分页, 且 from + size > index.max_result_window (默认 10000) 时报错:
+		      Result window is too large, from + size must be less than or equal to: [10000] but was [10010].
+		    · 和索引中存储的数据量无关, 只和单次查询的 from + size 有关。
+		      例: 每页 10 条翻到第 1001 页 (from=10000, size=10), 或者一次查询 size=10001。
+		- 如何避免:
+		    · 产品层面限制翻页深度: 例如只允许翻前 100 页 (百度、淘宝都有类似限制), 引导用户通过筛选条件缩小结果;
+		    · search_after + PIT (Point In Time, 7.10+): 用上一页最后一条数据的排序值作为下一页的起点,
+		      排序字段要包含唯一值 (如 _id 或业务 id) 作为兜底, 适合 "下一页" 式翻页和深度遍历, 官方推荐;
+		    · scroll: 生成快照遍历全量数据, 适合离线导出, 不适合实时的用户分页 (占用资源, 官方已不推荐用于深度分页);
+		    · 不推荐直接调大 index.max_result_window, 只是推迟问题, 会增加内存和 CPU 压力。
+		    · 详见: src/main/java/com/deepblue/inaction_05_elasticsearch/03_elasticsearch_pagelist/elasticsearch_分页查询限制和游标查询方案.txt
+
+
+Dubbo:
+	1. dubbo 中的 service 和 方法在 zookeeper 中放在什么节点中? 给出动态图 Dubbo_1_zookeeper存放方式_动态图.html
+		- 节点结构 (Dubbo 2.x 接口级注册):
+		    /dubbo-group                                    根节点, 取自 dubbo.registry.group, 默认 /dubbo       (持久)
+		      └─ /com.deepblue.api.EchoService              服务接口的全限定名, 一个接口一个节点               (持久)
+		           ├─ /providers/dubbo%3A%2F%2F...          每个提供者实例一个节点, 节点名是 URL 编码后的整条 URL (临时, dynamic=true 时)
+		           ├─ /consumers/consumer%3A%2F%2F...       每个消费者实例一个节点                              (临时)
+		           ├─ /configurators/override%3A%2F%2F...   动态配置: 权重、禁用、超时等, dubbo-admin 写入        (持久)
+		           └─ /routers/route%3A%2F%2F...            路由规则                                            (持久)
+		- service 放在哪: 接口全限定名就是节点名; 服务的 version、group 不是路径层级, 而是 URL 里的参数, 由消费者在本地过滤。
+		- 方法放在哪: 方法不单独占节点, 方法名去重后写在提供者 URL 的参数里, 例如本项目:
+		    dubbo://127.0.0.1:20882/com.deepblue.api.EchoService?...&interface=com.deepblue.api.EchoService&methods=sayHello&...
+		    · EchoService 有 sayHello() 和 sayHello(String) 两个重载, URL 中只有一个 methods=sayHello;
+		    · 但调用时 RpcInvocation 带着方法名 + 参数类型, 所以重载方法照样能正确调用;
+		      受影响的只是按方法名做的配置 (例如 <dubbo:method name="sayHello" timeout="..."/>), 它区分不了重载;
+		    · 完整的方法签名 (参数类型、返回值) 在 2.7+ 的元数据中心里, 不在注册中心。
+		- 注册和订阅流程:
+		    1. Provider 启动: 创建 /{group}/{接口}/providers 等持久目录节点, 再把自己的 URL 编码后作为临时节点写到 providers 下;
+		    2. Consumer 启动: 在 consumers 下写自己的 URL, 并对 providers、configurators、routers 调用 getChildren + watcher;
+		    3. 拿到的 URL 转成本地的 Invoker 列表, 每次调用在本地做负载均衡, 直连 Provider, 不经过 ZooKeeper;
+		    4. Provider 宕机: 会话过期 → 临时节点被删除 → Consumer 收到 NodeChildrenChanged → 重新 getChildren 并刷新 Invoker 列表;
+		    5. ZooKeeper 整体不可用时, Consumer 继续使用内存和本地缓存文件 (~/.dubbo/dubbo-registry-*.cache) 中的地址调用,
+		       只是感知不到上下线。
+		- 本项目的问题: 提供者 URL 中带有 dynamic=false (见 inaction_06_paxos_zookeeper/Zookeeper集群的安装.txt 的 ls 结果)。
+		    · 注册时执行 zkClient.create(path, url.getParameter("dynamic", true)), 第二个参数表示是否为临时节点,
+		      dynamic=false 时创建的是 持久节点, 用 stat 查看 ephemeralOwner = 0x0 即可确认;
+		    · 后果: Provider 宕机后节点不会被删除, Consumer 收不到下线通知; 重启后 pid、timestamp 变化, 又多出一个新节点, 旧节点一直残留;
+		    · 项目没有显式配置 dynamic, 这个值来自 2.7.1 注解的默认值; 修复: @Service(interfaceName = "echoService", dynamic = true)
+		      或升级 Dubbo, 然后手动删除残留节点。
+		- Dubbo 3 新增应用级服务发现: /services/{应用名}/{ip:port} 存实例, /dubbo/mapping/{接口} 存接口到应用名的映射,
+		  节点数量从 "接口数 × 实例数" 降到 "应用数 × 实例数"。
+
+
+Netty:
+	1. Netty 最常见的问题 和 如何使用? 我要落地的单位正交基! 单位正交基定义: 组成知识点的组基本单元
+		- 单位正交基 (8 个, 互不重叠, 任何 Netty 问题都能拆成它们的组合):
+		    ① 线程模型      EventLoopGroup / EventLoop                        谁来执行
+		    ② 处理链        Channel / Pipeline / Handler / Context            怎么流转
+		    ③ 内存          ByteBuf (池化、堆外、引用计数)                       数据放哪
+		    ④ 编解码        Decoder / Encoder (帧边界)                         数据长什么样
+		    ⑤ 异步结果      ChannelFuture / Promise / Listener                结果怎么拿
+		    ⑥ 连接生命周期  Bootstrap / ChannelOption / 心跳 / 重连 / 关闭       连接怎么活
+		    ⑦ 流量控制      高低水位 isWritable / autoRead                     发多快
+		    ⑧ 传输层        NIO / Epoll / 零拷贝                              底层用什么
+
+		- ① 线程模型 (主从 Reactor): Netty_1_线程模型.html
+		    · bossGroup (通常 1 个线程) 只负责 accept, 把新连接注册给 workerGroup (默认 CPU 核数 * 2 个线程);
+		    · 每个 EventLoop = 1 个线程 + 1 个 Selector + 1 个任务队列, 循环做三件事: select → processSelectedKeys → runAllTasks;
+		    · 一个 Channel 终生绑定一个 EventLoop, 所以同一个连接上的 Handler 天然串行, 不需要加锁;
+		      一个 EventLoop 服务很多 Channel → Handler 里一旦阻塞, 这个线程上的所有连接一起卡住。
+		    · 非 EventLoop 线程调用 channel.write 时, Netty 会把它封装成任务放进该 Channel 的 EventLoop 队列, 保证线程安全。
+		    · 常见问题: 在 channelRead 里查数据库 / 调 RPC / Thread.sleep → 吞吐骤降、心跳超时、大量连接被断。
+		      解决: 耗时逻辑放到业务线程池, 或 pipeline.addLast(new DefaultEventExecutorGroup(16), "biz", handler)
+		      让该 Handler 在独立的线程组中执行。
+
+		- ② 处理链: Netty_2_处理链.html
+		    · Pipeline 是 ChannelHandlerContext 组成的双向链表, head ⇄ ... ⇄ tail;
+		      Inbound 事件 (channelActive / channelRead / exceptionCaught) 从 head 往 tail 传;
+		      Outbound 操作 (write / flush / connect / close) 从 tail 往 head 传。
+		    · ctx.writeAndFlush 从 "当前 Handler" 往 head 方向找 Outbound; channel.writeAndFlush 从 tail 开始走完整条链。
+		      常见问题: 在 Inbound 里用 ctx.write, 而 Encoder 加在它后面 → 编码器被跳过, 写出去的不是 ByteBuf, 报错或对端收不到数据。
+		    · 事件必须手动往下传: ctx.fireChannelRead(msg), 不传后面的 Handler 就收不到。
+		    · Handler 默认不能被多个 Channel 共享; 无状态的才能加 @Sharable 做成单例,
+		      有状态的 (如 ByteToMessageDecoder 的子类) 每个连接 new 一个, 否则多个连接的数据串在一起。
+		    · exceptionCaught 要在最后一个 Handler 里处理 (记录日志 + ctx.close()), 否则异常传到 tail 只打一行 warn, 连接还挂着。
+
+		- ③ 内存 ByteBuf:
+		    · 读写双指针: 0 <= readerIndex <= writerIndex <= capacity, 读写切换不用 flip (对比 NIO ByteBuffer)。
+		    · 分类: Heap / Direct (堆外, 少一次拷贝, IO 默认用它), Pooled / Unpooled
+		      (默认 PooledByteBufAllocator, 类似 jemalloc 的 Arena → Chunk → Page → Subpage)。
+		    · 引用计数: refCnt 初始为 1, retain() +1, release() -1, 为 0 时归还内存池。
+		      原则: 谁最后使用, 谁释放。消息传给下一个 Handler (fireChannelRead) 或写出去 (write) 就不用自己释放,
+		      消息在本 Handler 中 "吃掉" 就必须 release。
+		    · SimpleChannelInboundHandler 会在 channelRead0 返回后自动 release; 继承 ChannelInboundHandlerAdapter 要自己 ReferenceCountUtil.release(msg)。
+		    · 常见问题: 内存泄漏, 日志出现 "LEAK: ByteBuf.release() was not called before it's garbage-collected",
+		      最终 OutOfDirectMemoryError。
+		      排查: 测试环境加 -Dio.netty.leakDetection.level=PARANOID 定位泄漏的调用栈; 线上默认 SIMPLE, 抽样约 1%。
+		      另一个坑: 在 channelRead0 中把 msg 交给异步线程使用, 方法返回后已被释放 → IllegalReferenceCountException, 需要先 retain()。
+
+		- ④ 编解码 (粘包 / 拆包):
+		    · 原因: TCP 是字节流, 没有消息边界; Nagle 算法、发送/接收缓冲区、MSS 分段都会让一次 write 和一次 read 不一一对应。
+		    · 解决就是定义帧边界, Netty 内置 4 种:
+		        FixedLengthFrameDecoder                固定长度
+		        LineBasedFrameDecoder                  换行符 (\n 或 \r\n)
+		        DelimiterBasedFrameDecoder             自定义分隔符
+		        LengthFieldBasedFrameDecoder           长度字段 + 内容 (最常用, 自定义协议首选)
+		    · LengthFieldBasedFrameDecoder(maxFrameLength, lengthFieldOffset, lengthFieldLength, lengthAdjustment, initialBytesToStrip),
+		      发送端配对 LengthFieldPrepender(4) 写长度。maxFrameLength 一定要设, 防止恶意的超大长度把内存撑爆。
+		    · 自定义解码器继承 ByteToMessageDecoder: 可读字节不够一帧就 return, 等下一批数据 (内部有累积缓冲区 cumulation)。
+		    · 顺序: 入站 帧解码器 → 对象解码器 → 业务 Handler; 出站 业务 → 对象编码器 → LengthFieldPrepender。
+		    · 现成协议: HttpServerCodec + HttpObjectAggregator、WebSocketServerProtocolHandler、ProtobufDecoder / ProtobufEncoder。
+
+		- ⑤ 异步结果:
+		    · Netty 的 IO 操作全部异步, 返回 ChannelFuture; bind / connect / write 返回时操作还没完成。
+		    · 正确用法: future.addListener(f -> { if (!f.isSuccess()) log.error("write failed", f.cause()); });
+		    · 常见问题: 在 EventLoop 线程里调用 future.sync() / await() → BlockingOperationException 或死锁
+		      (自己在等自己线程上的任务)。只能在 main 等非 IO 线程中 sync。
+		    · write 失败默认不会抛异常, 不加 Listener 的话数据丢了也不知道。
+
+		- ⑥ 连接生命周期:
+		    · ServerBootstrap: group / channel / option (作用于 ServerSocketChannel, 如 SO_BACKLOG)
+		      / childOption (作用于每个连接, 如 TCP_NODELAY、SO_KEEPALIVE) / childHandler。注意 option 和 childOption 不要搞混。
+		    · 心跳: IdleStateHandler(readerIdle, writerIdle, allIdle, unit) 触发 IdleStateEvent,
+		      在 userEventTriggered 中处理: 服务端读空闲 → 关闭连接; 客户端写空闲 → 发心跳包。
+		      为什么不用 TCP keepalive: 默认 2 小时才开始探测, 且只能说明对端内核活着, 不能说明进程还能处理业务。
+		    · 断线重连: 客户端在 channelInactive 或 connect 的 Listener 失败时,
+		      ctx.channel().eventLoop().schedule(() -> connect(), delay, TimeUnit.SECONDS), 延迟用指数退避。
+		    · 优雅关闭: bossGroup.shutdownGracefully(); workerGroup.shutdownGracefully();
+		      不关闭的话 EventLoop 线程是非守护线程, 进程退不出去; Spring 中放在 @PreDestroy 或 SmartLifecycle.stop 里。
+
+		- ⑦ 流量控制:
+		    · write 只是放进 ChannelOutboundBuffer, flush 才写入 Socket; 对端读得慢时, 一直 write 会让堆外内存不断上涨直到 OOM。
+		    · WRITE_BUFFER_WATER_MARK 默认 低 32KB / 高 64KB: 待发送字节 > 高水位 → isWritable() = false, 并触发 channelWritabilityChanged;
+		      降到低水位以下再变回 true。
+		    · 正确用法: 发送前判断 channel.isWritable(), 不可写时暂停生产或丢弃;
+		      自己处理不过来时 channel.config().setAutoRead(false) 暂停读取, 处理完再 setAutoRead(true)。
+		    · 频繁 writeAndFlush 每次都是一次系统调用; 批量场景用多次 write + 最后一次 flush, 或加 FlushConsolidationHandler。
+
+		- ⑧ 传输层:
+		    · Linux 上用 EpollEventLoopGroup + EpollServerSocketChannel (native, 边缘触发, 支持 SO_REUSEPORT), 比 JDK NIO 产生更少的垃圾、性能更好;
+		      Mac 对应 KQueue, 写法: Epoll.isAvailable() ? new EpollEventLoopGroup() : new NioEventLoopGroup()。
+		    · JDK NIO 空轮询 bug: Selector.select() 没有事件也立即返回, CPU 100%。
+		      Netty 的规避: 统计连续空轮询次数, 超过 512 (io.netty.selectorAutoRebuildThreshold) 就重建 Selector, 把 Channel 迁移过去。
+		    · 零拷贝 (Netty 层面主要是 "少拷贝"):
+		        Direct ByteBuf                 收发 Socket 时不需要在堆内外之间复制
+		        CompositeByteBuf               把多个 ByteBuf 逻辑上合成一个 (如 header + body), 不复制
+		        slice / duplicate              共享底层内存, 只是新的读写指针
+		        Unpooled.wrappedBuffer         包装已有数组, 不复制
+		        FileRegion / DefaultFileRegion 文件传输走 transferTo → sendfile (操作系统层面的零拷贝)
+
+		- 常见问题 → 对应的基:
+		    问题                                        根因所在的基
+		    粘包 / 拆包                                 ④
+		    堆外内存泄漏 / OutOfDirectMemoryError       ③ (没有 release), ⑦ (对端慢还一直 write)
+		    吞吐低, 心跳超时, 连接被批量断开            ① (EventLoop 中有阻塞调用)
+		    数据发出去了对端没收到                      ② (ctx.write 跳过了 Encoder), ⑤ (失败没有 Listener)
+		    BlockingOperationException / 死锁           ① + ⑤ (在 IO 线程中 sync)
+		    多个连接的数据串在一起                      ② (有状态 Handler 加了 @Sharable)
+		    大量 CLOSE_WAIT / 死连接                    ⑥ (没有心跳, 没有 close)
+		    CPU 100% 但没有请求                         ⑧ (空轮询, 老版本 JDK)
+		    进程关闭不了                                ⑥ (没有 shutdownGracefully)
+
+		- 如何使用 (最小可用模板, 就是 8 个基的组合):
+		    服务端:
+		        EventLoopGroup boss = new NioEventLoopGroup(1);                       // ①
+		        EventLoopGroup worker = new NioEventLoopGroup();                      // ①
+		        EventExecutorGroup biz = new DefaultEventExecutorGroup(16);           // ① 业务线程
+		        try {
+		            ServerBootstrap b = new ServerBootstrap()                         // ⑥
+		                .group(boss, worker)
+		                .channel(NioServerSocketChannel.class)                        // ⑧
+		                .option(ChannelOption.SO_BACKLOG, 1024)
+		                .childOption(ChannelOption.TCP_NODELAY, true)
+		                .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK,
+		                             new WriteBufferWaterMark(32 * 1024, 64 * 1024))  // ⑦
+		                .childHandler(new ChannelInitializer<SocketChannel>() {
+		                    @Override
+		                    protected void initChannel(SocketChannel ch) {
+		                        ch.pipeline()                                                         // ②
+		                          .addLast(new IdleStateHandler(60, 0, 0, TimeUnit.SECONDS))          // ⑥
+		                          .addLast(new LengthFieldBasedFrameDecoder(1024 * 1024, 0, 4, 0, 4)) // ④
+		                          .addLast(new LengthFieldPrepender(4))                               // ④
+		                          .addLast(new StringDecoder(CharsetUtil.UTF_8))
+		                          .addLast(new StringEncoder(CharsetUtil.UTF_8))
+		                          .addLast(biz, new ServerHandler());                                 // ① 业务放到 biz 线程
+		                    }
+		                });
+		            ChannelFuture f = b.bind(8080).sync();                            // ⑤ main 线程可以 sync
+		            f.channel().closeFuture().sync();
+		        } finally {
+		            boss.shutdownGracefully();                                        // ⑥
+		            worker.shutdownGracefully();
+		            biz.shutdownGracefully();
+		        }
+
+		    业务 Handler:
+		        public class ServerHandler extends SimpleChannelInboundHandler<String> {   // ③ 自动 release
+		            @Override
+		            protected void channelRead0(ChannelHandlerContext ctx, String msg) {
+		                if (ctx.channel().isWritable()) {                                  // ⑦
+		                    ctx.writeAndFlush("echo: " + msg).addListener(f -> {           // ⑤
+		                        if (!f.isSuccess()) {
+		                            ctx.close();
+		                        }
+		                    });
+		                }
+		            }
+
+		            @Override
+		            public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+		                if (evt instanceof IdleStateEvent) {
+		                    ctx.close();                                                   // ⑥ 读空闲, 踢掉
+		                } else {
+		                    super.userEventTriggered(ctx, evt);
+		                }
+		            }
+
+		            @Override
+		            public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+		                log.error("channel error", cause);                                 // ②
+		                ctx.close();
+		            }
+		        }
+
+		    客户端: 换成 Bootstrap + 一个 NioEventLoopGroup + NioSocketChannel, pipeline 对称 (编解码器相同),
+		    IdleStateHandler 改为写空闲时发心跳, connect 的 Listener 失败时 schedule 重连。
+
+		- 落地检查清单 (上线前按基逐条过一遍):
+		    ① EventLoop 中没有阻塞调用, 耗时操作已经放到业务线程池;
+		    ② 出站编码器在业务 Handler 之前, 最后一个 Handler 实现了 exceptionCaught, @Sharable 只加在无状态 Handler 上;
+		    ③ 测试环境用 PARANOID 跑过, 没有 LEAK 日志; 监控 PooledByteBufAllocator.DEFAULT.metric() 的堆外内存使用量;
+		    ④ 有明确的帧边界协议, 设置了 maxFrameLength;
+		    ⑤ 所有重要的 write 都有失败 Listener, IO 线程中没有 sync / await;
+		    ⑥ 有应用层心跳 + 空闲断开 + 客户端指数退避重连 + shutdownGracefully;
+		    ⑦ 设置了高低水位, 大批量发送前检查 isWritable;
+		    ⑧ Linux 生产环境使用 Epoll。

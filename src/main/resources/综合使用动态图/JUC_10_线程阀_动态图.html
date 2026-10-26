@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>线程阀动态图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .stage text.big { font-family: var(--f-mono); font-size: 40px; font-weight: 600; }
+  .stage text.tok { font-family: var(--f-mono); font-size: 11.5px; font-weight: 600; }
+  .stage .bar-fill { transform-box: fill-box; transform-origin: left center; transition: transform .7s cubic-bezier(.4, 0, .2, 1); }
+  .stage .gate { transform-box: fill-box; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">JUC · 10 · CountDownLatch / CyclicBarrier / Semaphore</p>
+    <h1>线程阀：闭锁、栅栏与信号量</h1>
+    <p class="lede">线程阀是控制多个线程执行节奏的同步工具。<code>CountDownLatch</code> 让线程等计数归零，<code>CyclicBarrier</code> 让一组线程互相等齐再一起走，<code>Semaphore</code> 限制同时访问资源的线程数。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>线程与同步器</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--accent)"></i>运行中</span>
+            <span><i class="sw" style="background:var(--warn)"></i>阻塞等待</span>
+            <span><i class="sw" style="background:var(--ok)"></i>放行 / 完成</span>
+            <span><i class="sw" style="background:var(--violet)"></i>许可</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 410" role="img" aria-label="多个线程在 CountDownLatch、CyclicBarrier、Semaphore 上等待和放行的过程"></svg>
+        <p class="cap">圆点代表线程。黄色闪烁表示线程被阻塞（park），绿色表示已放行或已完成。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>代码</h2></div>
+        <pre class="code" id="code"></pre>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>工具</th><th>作用</th><th>能否复用</th><th>实现</th></tr></thead>
+        <tbody>
+          <tr><td><code>CountDownLatch</code> 闭锁</td><td>计数减到 0 之前，<code>await</code> 的线程都阻塞。典型场景：主线程等待 N 个子任务完成</td><td>一次性，不能重置</td><td>AQS 共享模式，<code>state</code> = 计数值</td></tr>
+          <tr><td><code>CyclicBarrier</code> 栅栏</td><td>N 个线程互相等待，都到达屏障点后一起继续，可指定到达后执行的 <code>barrierAction</code></td><td>可循环使用</td><td><code>ReentrantLock</code> + <code>Condition</code></td></tr>
+          <tr><td><code>Semaphore</code> 信号量</td><td>控制同时访问资源的线程数（限流），<code>acquire</code> 获取许可、<code>release</code> 归还</td><td>许可可反复获取和归还</td><td>AQS 共享模式</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul style="margin-top:10px">
+      <li>CountDownLatch vs CyclicBarrier：前者是一个或多个线程等其他线程（计数由别人减），一次性；后者是一组线程互相等待，可循环使用。</li>
+      <li>其他线程阀：<code>Exchanger</code>（两个线程在同步点交换数据）、<code>Phaser</code>（JDK7，可动态调整参与者数量的多阶段栅栏）。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet, move } = Player;
+
+  // ---------- 每个场景的线程位置 ----------
+  const ROW = [80, 160, 240];
+  const POS = [
+    { // CountDownLatch
+      w0: { x: 56, y: ROW[0] }, w1: { x: 56, y: ROW[1] }, w2: { x: 56, y: ROW[2] },
+      e0: { x: 320, y: ROW[0] }, e1: { x: 320, y: ROW[1] }, e2: { x: 320, y: ROW[2] },
+      m0: { x: 600, y: 80 }, mw: { x: 626, y: 160 }, mgo: { x: 712, y: 160 },
+      latch: { x: 374, y: 140 }, latchR: { x: 530, y: 120 }, gate: { x: 690, y: 110 },
+    },
+    { // CyclicBarrier
+      s0: { x: 70, y: ROW[0] }, s1: { x: 70, y: ROW[1] }, s2: { x: 70, y: ROW[2] },
+      b0: { x: 390, y: ROW[0] }, b1: { x: 390, y: ROW[1] }, b2: { x: 390, y: ROW[2] },
+      p0: { x: 640, y: ROW[0] }, p1: { x: 640, y: ROW[1] }, p2: { x: 640, y: ROW[2] },
+      act: { x: 712, y: 366 },
+    },
+    { // Semaphore
+      s0: { x: 66, y: 70 }, s1: { x: 66, y: 140 }, s2: { x: 66, y: 210 }, s3: { x: 66, y: 280 },
+      r0: { x: 420, y: 100 }, r1: { x: 420, y: 210 },
+      q0: { x: 330, y: 372 }, q1: { x: 390, y: 372 }, q0w: { x: 296, y: 342 }, q1w: { x: 356, y: 342 },
+      d0: { x: 682, y: 70 }, d1: { x: 682, y: 140 }, d2: { x: 682, y: 210 }, d3: { x: 682, y: 280 },
+      pool0: { x: 212, y: 222 }, pool1: { x: 268, y: 222 }, h0: { x: 466, y: 100 }, h1: { x: 466, y: 210 },
+    },
+  ];
+
+  const CDL = { t: { W1: ['w0', 'soft'], W2: ['w1', 'soft'], W3: ['w2', 'soft'], main: ['m0', 'accent'] }, count: 3, gate: 'closed', prog: [0, 0, 0], tasks: ['', '', ''], note: '', result: '' };
+  const CB = { t: { T1: ['s0', 'accent'], T2: ['s1', 'accent'], T3: ['s2', 'accent'] }, arrived: 0, round: 1, gate: 'closed', waiting: '', action: '', result: '' };
+  const SEM = { t: { T1: ['s0', 'accent'], T2: ['s1', 'accent'], T3: ['s2', 'accent'], T4: ['s3', 'accent'] }, p: { P1: 'pool0', P2: 'pool1' }, permits: 2, queue: '', result: '' };
+
+  const scenarios = [
+    {
+      label: 'CountDownLatch(3)：主线程等 3 个任务',
+      code: ['CountDownLatch latch =', '    new CountDownLatch(3);', 'for (int i = 0; i < 3; i++) {', '    pool.execute(() -> {', '        doWork();', '        latch.countDown();', '    });', '}', 'latch.await();  // main 阻塞', 'mergeResults();'],
+      state: CDL,
+      steps: [
+        { title: '初始：count = 3', desc: '<p>创建 <code>CountDownLatch(3)</code>，计数器为 3，底层就是 AQS 的 <code>state = 3</code>。</p>', line: [1, 2] },
+        { title: '启动 3 个工作线程', desc: '<p>主线程提交 3 个任务，W1、W2、W3 开始执行 <code>doWork()</code>。</p>', line: [3, 4, 5],
+          set: { t: { W1: ['w0', 'accent'], W2: ['w1', 'accent'], W3: ['w2', 'accent'] }, prog: [0.25, 0.15, 0.2], tasks: ['doWork() 执行中', 'doWork() 执行中', 'doWork() 执行中'] } },
+        { title: 'main 调用 await()：阻塞', desc: '<p>count 不是 0，主线程在 <code>await()</code> 处<b class="warn">阻塞</b>，进入 AQS 等待队列。</p>', line: 9,
+          set: { t: { main: ['mw', 'warn'] }, prog: [0.45, 0.6, 0.35], note: 'await 阻塞的线程：main' } },
+        { title: 'W2 完成 → countDown()：3 → 2', desc: '<p>W2 做完任务，调用 <code>countDown()</code>，计数减 1。</p><p><code>countDown()</code> 本身不阻塞，W2 可以直接结束。</p>', line: 6,
+          set: { t: { W2: ['e1', 'ok'] }, count: 2, prog: [0.7, 1, 0.55], tasks: ['doWork() 执行中', '完成，countDown()', 'doWork() 执行中'] }, hot: 'latch', moves: [['e1', 'latch', '-1', 'ok']] },
+        { title: 'W1 完成 → countDown()：2 → 1', desc: '<p>完成顺序无所谓，只看计数。</p>', line: 6,
+          set: { t: { W1: ['e0', 'ok'] }, count: 1, prog: [1, 1, 0.8], tasks: ['完成，countDown()', '完成，countDown()', 'doWork() 执行中'] }, hot: 'latch', moves: [['e0', 'latch', '-1', 'ok']] },
+        { title: 'W3 完成 → countDown()：1 → 0', desc: '<p>最后一个任务完成，计数减到 <b class="ok">0</b>。</p>', line: 6,
+          set: { t: { W3: ['e2', 'ok'] }, count: 0, prog: [1, 1, 1], tasks: ['完成，countDown()', '完成，countDown()', '完成，countDown()'] }, hot: 'latch', moves: [['e2', 'latch', '-1', 'ok']] },
+        { title: 'count = 0：唤醒 await 的线程', desc: '<p>计数归零时，AQS 以共享模式唤醒所有在 <code>await()</code> 上等待的线程。主线程继续执行 <code>mergeResults()</code>。</p>', line: [9, 10],
+          set: { t: { main: ['mgo', 'ok'] }, gate: 'open', note: '', result: '3 个任务全部完成，main 继续执行', resultCls: 'c-ok' }, moves: [['latchR', 'gate', '唤醒', 'ok']] },
+        { title: '一次性：不能重置', desc: '<p>count 停在 0：之后再调用 <code>await()</code> 会立即返回，再 <code>countDown()</code> 也没有效果。</p><p>CountDownLatch <b>没有 reset 方法</b>，要再用一次只能新建一个。需要循环使用请看 CyclicBarrier。</p>',
+          set: { note: 'count 已为 0：之后的 await() 立即返回，无法重置', result: '' }, hot: 'latch', dwell: 3600 },
+      ],
+    },
+    {
+      label: 'CyclicBarrier(3)：互相等齐，可循环',
+      code: ['Runnable action = () -> merge();', 'CyclicBarrier barrier =', '    new CyclicBarrier(3, action);', '// 3 个线程各自循环:', 'while (true) {', '    doPhaseWork();', '    barrier.await();  // 等齐', '}'],
+      state: CB,
+      steps: [
+        { title: '初始：parties = 3', desc: '<p>创建 <code>CyclicBarrier(3, action)</code>：3 个线程都到达屏障后才放行，最后到达的线程先执行 <code>barrierAction</code>。</p>', line: [1, 2, 3] },
+        { title: 'T1 到达屏障：等待', desc: '<p>T1 先做完本阶段的工作，调用 <code>await()</code>，在屏障前<b class="warn">等待</b>（在 Condition 上 await）。</p>', line: 7,
+          set: { t: { T1: ['b0', 'warn'] }, arrived: 1, waiting: 'T1' } },
+        { title: 'T3 到达屏障：等待', desc: '<p>T3 也到了，已到达 2 / 3，还差一个。</p>', line: 7,
+          set: { t: { T3: ['b2', 'warn'] }, arrived: 2, waiting: 'T1, T3' } },
+        { title: 'T2 最后到达：执行 barrierAction', desc: '<p>T2 是最后一个到达的线程，由<b>它</b>来执行 <code>barrierAction</code>（这里是 <code>merge()</code>），执行完再唤醒其他线程。</p>', line: [1, 7],
+          set: { t: { T2: ['b1', 'accent'] }, arrived: 3, action: 'T2 正在执行 merge()' }, moves: [['b1', 'act', '', 'accent']] },
+        { title: '全部放行', desc: '<p>屏障打开，<code>signalAll</code> 唤醒等待的线程，T1、T2、T3 <b class="ok">一起继续</b>执行下一阶段。</p>', line: 6,
+          set: { t: { T1: ['p0', 'ok'], T2: ['p1', 'ok'], T3: ['p2', 'ok'] }, gate: 'open', waiting: '', action: '本轮已执行' } },
+        { title: '自动重置，进入第 2 轮', desc: '<p>放行的同时，屏障开启新的一代（generation），计数恢复为 3，<b>不需要手动重置</b>。</p><p>线程进入下一轮循环，再次走向同一个屏障。</p>', line: [5, 6],
+          set: { t: { T1: ['s0', 'accent'], T2: ['s1', 'accent'], T3: ['s2', 'accent'] }, gate: 'closed', arrived: 0, round: 2, action: '' } },
+        { title: '第 2 轮：T2、T1 先到', desc: '<p>这一轮到达顺序不同：T2、T1 先到并等待。</p>', line: 7,
+          set: { t: { T1: ['b0', 'warn'], T2: ['b1', 'warn'] }, arrived: 2, waiting: 'T1, T2' } },
+        { title: 'T3 最后到达：执行 action 并放行', desc: '<p>T3 最后到达，执行 <code>barrierAction</code> 后，三个线程再次一起通过。同一个屏障对象被复用了。</p>', line: [1, 7],
+          set: { t: { T1: ['p0', 'ok'], T2: ['p1', 'ok'], T3: ['p2', 'ok'] }, arrived: 3, gate: 'open', waiting: '', action: 'T3 执行了 merge()' }, moves: [['b2', 'act', '', 'accent']] },
+        { title: '小结：可循环的栅栏', desc: '<p>一组线程互相等待，到齐后一起走，然后自动重置。</p><p>如果有线程在等待时被中断或超时，屏障会被打破，其他等待线程抛出 <code>BrokenBarrierException</code>。</p>',
+          set: { result: '每轮 3 个线程到齐才放行，屏障自动重置可复用', resultCls: 'c-ok' }, dwell: 3600 },
+      ],
+    },
+    {
+      label: 'Semaphore(2)：4 个线程抢 2 个许可',
+      code: ['Semaphore sem = new Semaphore(2);', '// 4 个线程都执行:', 'sem.acquire();  // 没有许可就阻塞', 'try {', '    useResource();', '} finally {', '    sem.release();  // 归还许可', '}'],
+      state: SEM,
+      steps: [
+        { title: '初始：permits = 2', desc: '<p>创建 <code>Semaphore(2)</code>：最多 2 个线程同时使用资源。底层是 AQS 共享模式，<code>state</code> = 剩余许可数。</p>', line: 1 },
+        { title: 'T1 acquire：拿到许可', desc: '<p>还有许可，T1 用 CAS 把 state 从 2 减到 1，进入资源区。</p>', line: [3, 5],
+          set: { t: { T1: ['r0', 'ok'] }, p: { P1: 'h0' }, permits: 1 } },
+        { title: 'T2 acquire：拿到最后一个许可', desc: '<p>state 1 → 0。资源区已经有 2 个线程，满了。</p>', line: [3, 5],
+          set: { t: { T2: ['r1', 'ok'] }, p: { P2: 'h1' }, permits: 0 } },
+        { title: 'T3 acquire：没有许可，阻塞', desc: '<p>state 为 0，T3 进入 AQS 同步队列并 <code>park</code> <b class="warn">挂起</b>。</p>', line: 3,
+          set: { t: { T3: ['q0', 'warn'] }, queue: 'T3' } },
+        { title: 'T4 acquire：同样阻塞', desc: '<p>T4 排在 T3 后面等待。</p>', line: 3,
+          set: { t: { T4: ['q1', 'warn'] }, queue: 'T3 → T4' } },
+        { title: 'T1 release：归还许可', desc: '<p>T1 用完资源，在 <code>finally</code> 里 <code>release()</code>：state 0 → 1，并唤醒队头的 T3。</p><p>一定要放在 finally 里，否则异常时许可会泄漏。</p>', line: 7,
+          set: { t: { T1: ['d0', 'soft'] }, p: { P1: 'pool0' }, permits: 1 }, moves: [['pool0', 'q0w', '唤醒', 'ok']] },
+        { title: 'T3 被唤醒，拿到许可', desc: '<p>T3 醒来后再次尝试获取，state 1 → 0，进入资源区。</p>', line: [3, 5],
+          set: { t: { T3: ['r0', 'ok'] }, p: { P1: 'h0' }, permits: 0, queue: 'T4' } },
+        { title: 'T2 release，T4 拿到许可', desc: '<p>T2 归还许可，唤醒 T4，T4 拿到许可进入资源区。任意时刻资源区里最多 2 个线程。</p>', line: [5, 7],
+          set: { t: { T2: ['d1', 'soft'], T4: ['r1', 'ok'] }, p: { P2: 'h1' }, permits: 0, queue: '' }, moves: [['h1', 'q1w', '唤醒', 'ok']] },
+        { title: 'T3、T4 release：许可回到 2', desc: '<p>全部用完并归还，state 回到 2。</p>', line: 7,
+          set: { t: { T3: ['d2', 'soft'], T4: ['d3', 'soft'] }, p: { P1: 'pool0', P2: 'pool1' }, permits: 2 } },
+        { title: '小结：限流', desc: '<p>Semaphore 控制<b>同时</b>访问资源的线程数，适合限流（如数据库连接数）。</p><p>默认非公平；<code>new Semaphore(2, true)</code> 为公平模式，按排队顺序获取许可。</p>',
+          set: { result: '4 个线程，最多 2 个同时在资源区', resultCls: 'c-ok' }, dwell: 3600 },
+      ],
+    },
+  ];
+
+  let E;
+  function token(g, label, r) {
+    const tg = svg('g', { class: 'anim' }, g);
+    const c = svg('circle', { r: r || 17, class: 'box anim' }, tg);
+    svg('text', { y: 4, 'text-anchor': 'middle', class: 'tok' }, tg, label);
+    return { g: tg, c };
+  }
+  function area(g, x, y, w, h, title) {
+    svg('rect', { x, y, width: w, height: h, rx: 10, class: 'box soft' }, g);
+    if (title) svg('text', { x: x + 14, y: y + 22, class: 'small muted' }, g, title);
+  }
+
+  const builders = [
+    function initCDL(g) {
+      area(g, 16, 8, 330, 300, '工作线程');
+      E.bars = ROW.map((y, k) => {
+        svg('rect', { x: 84, y: y - 5, width: 216, height: 10, rx: 5, class: 'box soft' }, g);
+        const fill = svg('rect', { x: 84, y: y - 5, width: 216, height: 10, rx: 5, class: 'bar-fill', style: 'fill: var(--accent); transform: scaleX(0)' }, g);
+        const t = svg('text', { x: 84, y: y + 26, class: 'small muted' }, g, '');
+        return { fill, t };
+      });
+      E.latchBox = svg('rect', { x: 370, y: 90, width: 160, height: 140, rx: 10, class: 'box anim' }, g);
+      svg('text', { x: 450, y: 114, 'text-anchor': 'middle', class: 'title' }, g, 'CountDownLatch');
+      E.count = svg('text', { x: 450, y: 180, 'text-anchor': 'middle', class: 'big' }, g, '');
+      svg('text', { x: 450, y: 210, 'text-anchor': 'middle', class: 'small muted' }, g, 'count（AQS state）');
+      area(g, 556, 8, 188, 300, '主线程');
+      E.gate = svg('rect', { x: 660, y: 100, width: 10, height: 120, rx: 3, class: 'box anim gate' }, g);
+      svg('text', { x: 665, y: 244, 'text-anchor': 'middle', class: 'small muted' }, g, 'await()');
+      E.note = svg('text', { x: 380, y: 346, 'text-anchor': 'middle', class: 'c-warn' }, g, '');
+      E.result = svg('text', { x: 380, y: 384, 'text-anchor': 'middle', class: 'title' }, g, '');
+    },
+    function initCB(g) {
+      area(g, 16, 8, 728, 292, '');
+      ROW.forEach(y => svg('line', { x1: 90, y1: y, x2: 700, y2: y, class: 'wire dashed' }, g));
+      svg('text', { x: 70, y: 36, 'text-anchor': 'middle', class: 'small muted' }, g, '起点');
+      svg('text', { x: 640, y: 36, 'text-anchor': 'middle', class: 'small muted' }, g, '下一阶段');
+      E.gate = svg('rect', { x: 420, y: 48, width: 12, height: 232, rx: 3, class: 'box anim' }, g);
+      svg('text', { x: 426, y: 36, 'text-anchor': 'middle', class: 'small muted' }, g, '屏障');
+      svg('rect', { x: 16, y: 316, width: 360, height: 88, rx: 10, class: 'box soft' }, g);
+      svg('text', { x: 30, y: 338, class: 'small muted' }, g, 'CyclicBarrier（ReentrantLock + Condition）');
+      E.round = svg('text', { x: 30, y: 364, class: 'mono' }, g, '');
+      E.arrived = svg('text', { x: 190, y: 364, class: 'mono' }, g, '');
+      E.waiting = svg('text', { x: 30, y: 390, class: 'small c-warn' }, g, '');
+      E.actBox = svg('rect', { x: 392, y: 316, width: 352, height: 88, rx: 10, class: 'box anim' }, g);
+      svg('text', { x: 406, y: 338, class: 'small muted' }, g, 'barrierAction：merge()');
+      E.action = svg('text', { x: 406, y: 370, class: '' }, g, '');
+      E.result = svg('text', { x: 230, y: 290, 'text-anchor': 'middle', class: 'title' }, g, '');
+    },
+    function initSEM(g) {
+      area(g, 16, 8, 104, 304, '线程');
+      E.semBox = svg('rect', { x: 140, y: 90, width: 200, height: 160, rx: 10, class: 'box anim' }, g);
+      svg('text', { x: 240, y: 114, 'text-anchor': 'middle', class: 'title' }, g, 'Semaphore');
+      svg('text', { x: 240, y: 134, 'text-anchor': 'middle', class: 'small muted' }, g, 'permits（AQS state）');
+      E.count = svg('text', { x: 240, y: 186, 'text-anchor': 'middle', class: 'big' }, g, '');
+      area(g, 360, 8, 240, 304, '共享资源（最多 2 个线程）');
+      [100, 210].forEach(y => {
+        svg('rect', { x: 384, y: y - 32, width: 196, height: 64, rx: 8, class: 'box dashed' }, g);
+        svg('text', { x: 488, y: y + 4, class: 'mono small muted' }, g, 'useResource()');
+      });
+      area(g, 620, 8, 124, 304, '已完成');
+      E.qBox = svg('rect', { x: 140, y: 330, width: 460, height: 76, rx: 10, class: 'box anim' }, g);
+      svg('text', { x: 154, y: 352, class: 'small muted' }, g, 'AQS 同步队列');
+      svg('text', { x: 154, y: 372, class: 'small muted' }, g, '（park 挂起）');
+      E.queue = svg('text', { x: 430, y: 377, class: 'mono small c-warn' }, g, '');
+      E.permits = {};
+      for (const k of ['P1', 'P2']) {
+        const t = token(g, 'P', 11);
+        E.permits[k] = t;
+      }
+      E.result = svg('text', { x: 240, y: 290, 'text-anchor': 'middle', class: 'title' }, g, '');
+    },
+  ];
+
+  Player({
+    scenarios,
+    dwell: 2600,
+    init(g, ctx) {
+      E = { tokens: {} };
+      builders[ctx.scenario](g);
+      const st0 = scenarios[ctx.scenario].state;
+      for (const k in st0.t) {
+        E.tokens[k] = token(g, k, k === 'main' ? 20 : 17);
+        const p = POS[ctx.scenario][st0.t[k][0]];
+        move(E.tokens[k].g, p.x, p.y);
+      }
+      if (E.permits) for (const k in E.permits) { const p = POS[2][st0.p[k]]; move(E.permits[k].g, p.x, p.y); }
+    },
+    render(st, step, i, ctx) {
+      const P = POS[ctx.scenario];
+      for (const k in st.t) {
+        const [pos, cls] = st.t[k];
+        const T = E.tokens[k];
+        move(T.g, P[pos].x, P[pos].y);
+        T.c.setAttribute('class', 'box anim ' + cls + (cls === 'warn' ? ' pulse' : ''));
+      }
+      if (ctx.scenario === 0) {
+        E.count.textContent = st.count;
+        E.count.setAttribute('class', 'big ' + (st.count === 0 ? 'c-ok' : 'c-accent'));
+        E.latchBox.setAttribute('class', 'box anim ' + (step.hot === 'latch' ? 'accent' : st.count === 0 ? 'ok' : ''));
+        E.bars.forEach((b, k) => {
+          b.fill.style.transform = `scaleX(${st.prog[k]})`;
+          b.fill.style.fill = st.prog[k] >= 1 ? 'var(--ok)' : 'var(--accent)';
+          b.t.textContent = st.tasks[k];
+        });
+        const open = st.gate === 'open';
+        E.gate.setAttribute('class', 'box anim gate ' + (open ? 'ok dashed' : 'bad'));
+        E.gate.style.transform = open ? 'translateY(-70px)' : 'none';
+        E.gate.style.opacity = open ? 0.35 : 1;
+        E.note.textContent = st.note;
+      } else if (ctx.scenario === 1) {
+        const open = st.gate === 'open';
+        E.gate.setAttribute('class', 'box anim ' + (open ? 'ok dashed' : 'bad'));
+        E.gate.style.opacity = open ? 0.35 : 1;
+        E.round.textContent = `第 ${st.round} 轮`;
+        E.arrived.textContent = `已到达 ${st.arrived} / 3`;
+        E.arrived.setAttribute('class', 'mono ' + (st.arrived === 3 ? 'c-ok' : st.arrived ? 'c-warn' : ''));
+        E.waiting.textContent = st.waiting ? 'Condition 上等待：' + st.waiting : '';
+        E.action.textContent = st.action;
+        E.action.setAttribute('class', /正在/.test(st.action) ? 'c-accent' : 'muted');
+        E.actBox.setAttribute('class', 'box anim ' + (/正在|执行了/.test(st.action) ? 'accent' : ''));
+      } else {
+        for (const k in st.p) {
+          const pos = st.p[k], T = E.permits[k];
+          move(T.g, P[pos].x, P[pos].y);
+          T.c.setAttribute('class', 'box anim ' + (pos.startsWith('pool') ? 'ok' : 'violet'));
+        }
+        E.count.textContent = st.permits;
+        E.count.setAttribute('class', 'big ' + (st.permits === 0 ? 'c-bad' : 'c-ok'));
+        E.semBox.setAttribute('class', 'box anim ' + (st.permits === 0 ? 'bad' : ''));
+        E.queue.textContent = st.queue ? '队列：' + st.queue : '';
+        E.qBox.setAttribute('class', 'box anim ' + (st.queue ? 'warn' : 'soft'));
+      }
+      E.result.textContent = st.result || '';
+      E.result.setAttribute('class', 'title ' + (st.resultCls || ''));
+      for (const [from, to, label, cls] of step.moves || []) packet(ctx.fx, P[from], P[to], label, cls);
+    },
+  });
+})();
+</script>
+</body>
+</html>

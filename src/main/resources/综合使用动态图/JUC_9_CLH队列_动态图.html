@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLH 队列动态图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .code, .stage text { font-variant-ligatures: none; }
+  .stage .late { animation: late .35s .6s both; }
+  @keyframes late { from { opacity: 0; } }
+  .stage .curve { fill: none; stroke-width: 1.6; }
+  .stage .curve.spin { stroke: var(--warn); }
+  .stage .curve.pred { stroke: var(--muted); stroke-dasharray: 4 4; }
+  @media (prefers-reduced-motion: reduce) { .stage .late { animation: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">JUC · 9 · CLH Queue</p>
+    <h1>CLH 队列：在前驱上自旋的公平锁，以及 AQS 的变体</h1>
+    <p class="lede">CLH 锁（Craig、Landin、Hagersten）是一种基于链表的公平自旋锁：每个线程申请锁时创建一个节点，把自己原子地设为 tail 并拿到前驱，然后只在<b>前驱节点的 locked 标志</b>上自旋。AQS 借用了这个思路，但改成显式双向链表，并用 park 代替自旋。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>节点链表与线程</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--ok)"></i>持有锁 / locked = false</span>
+            <span><i class="sw" style="background:var(--warn)"></i>自旋 / park 等待</span>
+            <span><i class="sw" style="background:var(--accent)"></i>当前动作</span>
+            <span><i class="sw" style="background:var(--bad)"></i>已取消</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 400" role="img" aria-label="CLH 锁与 AQS 变体中节点、前驱和线程的变化"></svg>
+        <p class="cap">原始 CLH：橙色虚线表示线程正在自旋读取前驱节点的 <code>locked</code>，灰色虚线表示线程通过 myPred 记住的前驱。AQS 变体：节点之间上面的箭头是 next，下面的箭头是 prev。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>代码（简化）</h2></div>
+        <pre class="code" id="code"></pre>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <ul>
+      <li>CLH 锁是基于链表的公平自旋锁：每个线程申请锁时创建节点，通过原子操作把自己设为 tail 并拿到前驱；只在<b>前驱节点的 locked 标志</b>上自旋，前驱释放时把 locked 置为 false，当前线程就获得锁。</li>
+      <li>优点：公平（FIFO）；每个线程只自旋在自己前驱的变量上（本地自旋），避免所有线程争抢同一个变量，减少缓存一致性流量。</li>
+    </ul>
+    <div class="tablewrap" style="margin-top:10px">
+      <table>
+        <thead><tr><th></th><th>原始 CLH 锁</th><th>AQS 中的 CLH 变体</th></tr></thead>
+        <tbody>
+          <tr><td>链表</td><td>隐式单向：节点里没有指针，前驱只保存在线程的 myPred 中</td><td>显式双向链表：<code>prev</code> 用于处理取消的节点，<code>next</code> 用于唤醒后继</td></tr>
+          <tr><td>等待方式</td><td>在前驱的 <code>locked</code> 上自旋，占用 CPU</td><td>前驱 <code>waitStatus</code> 为 SIGNAL 后 <code>park</code> 挂起，由前驱释放时 <code>unpark</code> 唤醒</td></tr>
+          <tr><td>持锁者</td><td>前驱 locked = false 的那个线程</td><td><code>head</code> 是一个哑节点，代表当前持有锁的线程</td></tr>
+          <tr><td>取消 / 超时</td><td>不支持</td><td>节点置为 CANCELLED(1)，后继沿 <code>prev</code> 跳过；唤醒时 next 无效就从 tail 往前找</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet, arrow, move } = Player;
+  const NX = k => 40 + k * 180, NY = 136, NW = 140, NH = 86, TY = 296;
+  const OFF = [420, 540, 660];
+  const WSN = { 0: '', '-1': ' SIGNAL', 1: ' CANCELLED' };
+
+  const N0 = { id: 'N0', name: 'QNode', note: '初始节点', locked: false };
+  const nd = (who, o) => ({ id: 'N' + who, name: 'QNode · ' + who, note: who + ' 的节点', locked: true, ...o });
+  const S1 = { aqs: false, nodes: [N0], tail: 'N0', holder: null, links: [],
+    toks: { A: { at: 's1', cls: '', s: '空闲' }, B: { at: 's2', cls: '', s: '空闲' }, C: { at: 's3', cls: '', s: '空闲' } }, result: '' };
+
+  const H = o => ({ id: 'h', th: null, ws: 0, ...o });
+  const S2 = { aqs: true, state: 1, holder: 'A', nodes: [H()], links: [],
+    toks: { A: { at: 'h', cls: 'ok', s: '持锁（head 代表）' }, B: { at: 's1', cls: '', s: '' }, C: { at: 's2', cls: '', s: '' } }, result: '' };
+
+  const scenarios = [
+    {
+      label: '原始 CLH 锁：在前驱上自旋',
+      state: S1,
+      code: [
+        '// QNode { volatile boolean locked; }',
+        '// tail 初始指向 locked=false 的节点',
+        'AtomicReference<QNode> tail;',
+        'ThreadLocal<QNode> myNode, myPred;',
+        'void lock() {',
+        '  QNode node = new QNode();',
+        '  node.locked = true;   // 我要锁',
+        '  QNode pred = tail.getAndSet(node);',
+        '  myNode.set(node); myPred.set(pred);',
+        '  while (pred.locked) { } // 自旋',
+        '}',
+        'void unlock() {',
+        '  QNode node = myNode.get();',
+        '  node.locked = false; // 放行后继',
+        '}',
+      ],
+      steps: [
+        { title: '初始状态', desc: '<p><code>tail</code> 指向一个 <code>locked = false</code> 的初始节点，表示锁空闲。</p><p>A、B、C 三个线程将依次调用 <code>lock()</code>。</p>' },
+        { title: 'A：创建节点，locked = true', desc: '<p>A 新建自己的节点，并把 <code>locked</code> 设为 true，意思是"我要锁，后面的人等我"。</p>',
+          line: [6, 7], set: { nodes: [N0, nd('A', { cls: 'accent' })], toks: { A: { cls: 'accent', s: '创建节点' } } } },
+        { title: 'A：getAndSet 把自己设为 tail', desc: '<p><code>tail.getAndSet(node)</code> 原子地把 tail 换成 A 的节点，并<b>返回旧的 tail</b>，它就是 A 的前驱。</p><p>多个线程同时入队也不会乱，每个人拿到的前驱都不同。</p>',
+          line: [8, 9], set: { tail: 'NA', nodes: [N0, nd('A')], links: [['A', 'N0', 'pred']], toks: { A: { s: 'pred = 初始节点' } } }, hot: ['tail'], moves: [['A', 'tail', 'getAndSet', 'accent']] },
+        { title: 'A：前驱 locked = false，直接获得锁', desc: '<p>A 检查 <code>pred.locked</code>，是 false，<code>while</code> 不循环，<b class="ok">直接获得锁</b>。</p>',
+          line: 10, set: { holder: 'A', nodes: [{ ...N0, cls: 'soft' }, nd('A')], links: [], toks: { A: { cls: 'ok', s: '持有锁' } } }, hot: ['holder'] },
+        { title: 'B：入队，前驱是 A 的节点', desc: '<p>B 创建节点（locked = true），<code>getAndSet</code> 后 tail 指向 B 的节点，拿到的前驱是 <b>A 的节点</b>。</p>',
+          line: [6, 7, 8], set: { tail: 'NB', nodes: [{ ...N0, cls: 'soft' }, nd('A'), nd('B', { cls: 'accent' })], links: [['B', 'NA', 'pred']], toks: { B: { cls: 'accent', s: 'pred = A 的节点' } } }, hot: ['tail'], moves: [['B', 'tail', 'getAndSet', 'accent']] },
+        { title: 'B：在 A 节点的 locked 上自旋', desc: '<p>A 的 locked 是 true，B 进入 <code>while (pred.locked)</code> 循环。</p><p><b>本地自旋</b>：这个值会被缓存在 B 所在 CPU 的缓存里，反复读取不产生总线流量，直到 A 修改它。</p>',
+          line: 10, set: { nodes: [{ ...N0, cls: 'soft' }, nd('A'), nd('B')], links: [['B', 'NA', 'spin']], toks: { B: { cls: 'warn', s: '自旋：A.locked' } } } },
+        { title: 'C：入队，在 B 节点上自旋', desc: '<p>C 同样入队，tail 指向 C 的节点，前驱是 B 的节点，在 <code>B.locked</code> 上自旋。</p><p>B 和 C 各自盯着<b>不同的变量</b>，不会争抢同一个缓存行。</p>',
+          line: [6, 7, 8, 10], set: { tail: 'NC', nodes: [{ ...N0, cls: 'soft' }, nd('A'), nd('B'), nd('C', { cls: 'accent' })], links: [['B', 'NA', 'spin'], ['C', 'NB', 'spin']], toks: { C: { cls: 'warn', s: '自旋：B.locked' } } }, hot: ['tail'], moves: [['C', 'tail', 'getAndSet', 'accent']] },
+        { title: 'A：unlock，把自己的 locked 置为 false', desc: '<p>A 只修改<b>自己节点</b>的 <code>locked = false</code>。</p><p>缓存一致性协议只需要让 B 那份缓存失效，C 完全不受影响。</p>',
+          line: [13, 14], set: { holder: null, nodes: [{ ...N0, cls: 'soft' }, nd('A', { locked: false, cls: 'ok' }), nd('B'), nd('C')], toks: { A: { cls: 'soft', s: '已释放' } } }, hot: ['holder'], moves: [['NA', 'B', 'locked=false', 'ok']] },
+        { title: 'B：读到 false，获得锁', desc: '<p>B 的自旋读到 <code>false</code>，跳出循环，<b class="ok">获得锁</b>。A 的节点不再被需要（原算法中 A 会复用前驱节点作为下次的节点）。</p>',
+          line: 10, set: { holder: 'B', nodes: [{ ...N0, cls: 'soft' }, nd('A', { locked: false, cls: 'soft' }), nd('B'), nd('C')], links: [['C', 'NB', 'spin']], toks: { B: { cls: 'ok', s: '持有锁' } } }, hot: ['holder'] },
+        { title: 'B unlock → C 获得锁', desc: '<p>B 把自己的 <code>locked</code> 置为 false，C 读到后获得锁。</p>',
+          line: 14, set: { holder: 'C', nodes: [{ ...N0, cls: 'soft' }, nd('A', { locked: false, cls: 'soft' }), nd('B', { locked: false, cls: 'soft' }), nd('C', { cls: 'ok' })], links: [], toks: { B: { cls: 'soft', s: '已释放' }, C: { cls: 'ok', s: '持有锁' } } }, hot: ['holder'], moves: [['NB', 'C', 'locked=false', 'ok']] },
+        { title: '结论：FIFO + 本地自旋', desc: '<p>获取顺序严格等于入队顺序 A → B → C，是<b>公平锁</b>。</p><p>每个线程只在前驱的变量上自旋，减少缓存一致性流量。</p><p>注意链表是<b>隐式</b>的：节点里没有 next / prev 指针，前驱只记在线程自己的 <code>myPred</code> 里。</p>',
+          set: { result: '获取顺序 A → B → C：先到先得，每人只盯着自己的前驱', resultCls: 'c-ok' }, dwell: 3800 },
+      ],
+    },
+    {
+      label: 'AQS 变体：双向链表 + park',
+      state: S2,
+      code: [
+        '// 1. 入队：显式双向链表',
+        'node.prev = pred;',
+        'if (compareAndSetTail(pred, node))',
+        '  pred.next = node;',
+        '// 2. 不自旋：前驱设 SIGNAL 后 park',
+        'if (ws == Node.SIGNAL) return true;',
+        'if (ws > 0) {   // 跳过 CANCELLED',
+        '  do { node.prev = pred = pred.prev; }',
+        '  while (pred.waitStatus > 0);',
+        '  pred.next = node;',
+        '} else CAS(pred.ws, ws, SIGNAL);',
+        'LockSupport.park(this);',
+        '// 3. 释放：唤醒 head 的后继',
+        'Node s = head.next;',
+        'if (s == null || s.waitStatus > 0)',
+        '  s = 从 tail 沿 prev 往前找;',
+        'LockSupport.unpark(s.thread);',
+        '// 4. 获取成功：成为新的哑节点',
+        'setHead(node); // thread=prev=null',
+      ],
+      steps: [
+        { title: '初始：head 哑节点代表持锁的 A', desc: '<p>A 已经通过 CAS 持有锁（state = 1）。队列已初始化，<code>head</code> 是一个 <code>thread = null</code> 的<b>哑节点</b>，代表当前持有锁的线程。</p>' },
+        { title: 'B 入队：显式 prev / next', desc: '<p>B 获取失败入队：先 <code>node.prev = pred</code>，CAS tail 成功后再 <code>pred.next = node</code>。</p><p>和原始 CLH 不同，前驱、后继都<b>显式存在节点里</b>：prev 用于处理取消的节点，next 用于唤醒后继。</p>',
+          line: [2, 3, 4], set: { nodes: [H(), { id: 'nB', th: 'B', ws: 0, cls: 'accent' }], toks: { B: { at: 'nB', cls: 'accent', s: '已入队' } } } },
+        { title: 'B 不自旋：前驱置 SIGNAL 后 park', desc: '<p>B 把前驱 head 的 <code>waitStatus</code> 设为 <b>SIGNAL(-1)</b>，然后 <code>LockSupport.park</code> 挂起。</p><p class="ok">不像 CLH 那样一直自旋，等待期间不占 CPU，适合长时间持锁的场景。</p>',
+          line: [11, 12], set: { nodes: [H({ ws: -1, cls: 'warn' }), { id: 'nB', th: 'B', ws: 0 }], toks: { B: { cls: 'warn', s: 'park（不占 CPU）' } } } },
+        { title: 'C 入队，B 节点置 SIGNAL，C park', desc: '<p>C 接到 B 后面：<code>C.prev = B</code>，<code>B.next = C</code>；把 B 节点的 ws 设为 SIGNAL 后 park。</p>',
+          line: [2, 3, 4, 11, 12], set: { nodes: [H({ ws: -1 }), { id: 'nB', th: 'B', ws: -1, cls: 'warn' }, { id: 'nC', th: 'C', ws: 0, cls: 'accent' }], toks: { C: { at: 'nC', cls: 'warn', s: 'park' } } } },
+        { title: 'B 超时：节点置为 CANCELLED', desc: '<p>B 用的是 <code>tryLock(timeout)</code>，等待超时。<code>cancelAcquire</code> 把 B 节点的 <code>thread = null</code>、<code>waitStatus = CANCELLED(1)</code>，B 返回 false 离开。</p><p>B 的前驱是 head，所以顺手唤醒后继 C，让它去修正链表。</p>',
+          set: { nodes: [H({ ws: -1 }), { id: 'nB', th: null, ws: 1, cls: 'bad' }, { id: 'nC', th: 'C', ws: 0 }], toks: { B: { at: 'o1', cls: 'bad', s: '超时返回' }, C: { cls: 'accent', s: '被唤醒' } } }, moves: [['nB', 'C', 'unpark', 'accent']] },
+        { title: 'C：沿 prev 跳过取消节点，再 park', desc: '<p>C 醒来，前驱不是 head，<code>shouldParkAfterFailedAcquire</code> 发现前驱 ws &gt; 0，沿 <code>prev</code> 往前找到有效节点 head：<code>C.prev = head</code>，<code>head.next = C</code>，B 节点脱离队列。</p><p>再试一次仍拿不到锁（A 还持有），C 再次 park。</p>',
+          line: [7, 8, 9, 10, 12], set: { nodes: [H({ ws: -1 }), { id: 'nC', th: 'C', ws: 0, cls: 'warn' }], toks: { C: { cls: 'warn', s: 'park' } } } },
+        { title: 'A 释放：unpark(head.next)', desc: '<p>A unlock，state 归 0。head 的 ws 是 SIGNAL，调用 <code>unparkSuccessor(head)</code>：取 <code>head.next</code> 也就是 C，<code>unpark</code> 它。</p><p>如果 next 为 null 或已取消，会从 <code>tail</code> 沿 prev 往前找最靠前的有效节点。</p>',
+          line: [14, 15, 16, 17], set: { state: 0, holder: null, nodes: [H({ ws: 0, cls: 'accent' }), { id: 'nC', th: 'C', ws: 0 }], toks: { A: { at: 'o0', cls: 'soft', s: '已释放' }, C: { cls: 'accent', s: '被唤醒' } } }, hot: ['holder'], moves: [['h', 'C', 'unpark', 'accent']] },
+        { title: 'C 获取成功：成为新的 head', desc: '<p>C 的前驱是 head，<code>tryAcquire</code> 成功。<code>setHead(node)</code>：C 的节点成为新的哑节点（thread、prev 清空），旧 head 断开等待 GC。</p>',
+          line: 19, set: { state: 1, holder: 'C', nodes: [{ id: 'nC', th: null, ws: 0, cls: 'ok' }], toks: { C: { cls: 'ok', s: '持锁（head 代表）' } } }, hot: ['holder'] },
+        { title: '结论：CLH 思想 + 三处改造', desc: '<p>仍然是 FIFO 链表、每个节点只关心自己的前驱。</p><p>改造：① 显式双向链表；② park / unpark 代替自旋；③ head 是代表持锁线程的哑节点。另外支持取消（CANCELLED）和条件队列。</p>',
+          set: { result: 'AQS：显式 prev / next + park 代替自旋 + head 哑节点', resultCls: 'c-ok' }, dwell: 3800 },
+      ],
+    },
+  ];
+
+  let E;
+  const nodeIdx = (st, id) => st.nodes.findIndex(n => n.id === id);
+  function tokPos(st, at) {
+    if (at[0] === 's' && /^s\d$/.test(at)) return { x: NX(+at[1]) + NW / 2, y: TY };
+    if (at[0] === 'o') return { x: OFF[+at[1]], y: 48 };
+    const k = nodeIdx(st, at);
+    return k >= 0 ? { x: NX(k) + NW / 2, y: TY } : { x: 380, y: TY };
+  }
+  function pt(st, key, prev) {
+    if (key === 'tail') return { x: 228, y: 30 };
+    if (st.toks[key]) { const q = tokPos(prev || st, (prev || st).toks[key].at); return { x: q.x, y: q.y - 24 }; }
+    const k = nodeIdx(st, key);
+    return k >= 0 ? { x: NX(k) + NW / 2, y: NY + NH - 10 } : { x: 380, y: 200 };
+  }
+
+  function makeNode(id) {
+    const g = svg('g', { class: 'anim hide' }, E.nodeLayer);
+    const r = svg('rect', { x: 0, y: 0, width: NW, height: NH, rx: 8, class: 'box anim' }, g);
+    const t1 = svg('text', { x: 12, y: 24, class: 'title' }, g, '');
+    const t2 = svg('text', { x: 12, y: 50, class: 'mono' }, g, '');
+    const t3 = svg('text', { x: 12, y: 72, class: 'mono' }, g, '');
+    return (E.nodes[id] = { g, r, t1, t2, t3, fresh: true });
+  }
+
+  Player({
+    scenarios,
+    dwell: 2900,
+    init(g, ctx) {
+      const aqs = ctx.scenario === 1;
+      E = { nodes: {}, toks: {}, prev: null };
+      const defs = svg('defs', {}, ctx.svg);
+      for (const c of ['warn', 'muted']) {
+        const m = svg('marker', { id: 'mk-' + c, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto' }, defs);
+        svg('path', { d: 'M0,0 L10,5 L0,10 z', style: `fill: var(--${c})` }, m);
+      }
+      svg('rect', { x: 16, y: 12, width: 300, height: 72, rx: 10, class: 'box soft' }, g);
+      svg('text', { x: 30, y: 36, class: 'title' }, g, aqs ? 'AQS' : 'CLHLock');
+      E.row1 = svg('text', { x: 30, y: 62, class: 'mono' }, g, '');
+      E.hl = svg('rect', { x: 22, y: 42, width: 288, height: 30, rx: 6, class: 'box accent anim hide' }, g);
+      E.row1.parentNode.appendChild(E.row1);
+      svg('rect', { x: 332, y: 12, width: 412, height: 72, rx: 10, class: 'box soft' }, g);
+      if (aqs) {
+        svg('text', { x: 346, y: 32, class: 'small muted' }, g, '离开队列的线程');
+      } else {
+        svg('text', { x: 346, y: 38, class: 'small muted' }, g, '隐式链表：节点里没有 next / prev 指针，');
+        svg('text', { x: 346, y: 60, class: 'small muted' }, g, '前驱只保存在线程自己的 myPred 里。');
+        E.holder = svg('text', { x: 730, y: 49, 'text-anchor': 'end', class: 'title c-ok' }, g, '');
+      }
+      E.links = svg('g', {}, g);
+      E.nodeLayer = svg('g', {}, g);
+      E.curves = svg('g', {}, g);
+      for (const name of ['A', 'B', 'C']) {
+        const tg = svg('g', { class: 'anim' }, g);
+        const r = svg('rect', { x: -26, y: -13, width: 52, height: 26, rx: 13, class: 'box anim' }, tg);
+        svg('text', { x: 0, y: 5, 'text-anchor': 'middle', class: 'mono title' }, tg, name);
+        const s = svg('text', { x: 0, y: 30, 'text-anchor': 'middle', class: 'small' }, tg, '');
+        E.toks[name] = { g: tg, r, s };
+      }
+      E.result = svg('text', { x: 380, y: 384, 'text-anchor': 'middle', class: 'title' }, g, '');
+    },
+    render(st, step, i, ctx) {
+      const hot = step.hot || [];
+      if (st.aqs) {
+        E.row1.textContent = `state = ${st.state}    持锁：${st.holder || '无'}`;
+      } else {
+        const tn = st.nodes[nodeIdx(st, st.tail)];
+        E.row1.textContent = 'tail → ' + (tn.id === 'N0' ? '初始节点' : tn.name);
+        E.holder.textContent = st.holder ? '持有锁：' + st.holder : '锁空闲';
+        E.holder.setAttribute('class', 'title ' + (st.holder ? 'c-ok' : 'muted'));
+      }
+      E.hl.classList.toggle('hide', !(hot.includes('tail') || (st.aqs && hot.includes('holder'))));
+
+      const live = new Set(st.nodes.map(n => n.id));
+      st.nodes.forEach((n, k) => {
+        const N = E.nodes[n.id] || makeNode(n.id);
+        N.r.setAttribute('class', 'box anim ' + (n.cls || ''));
+        if (st.aqs) {
+          N.t1.textContent = k === 0 ? 'head（哑节点）' : 'Node';
+          N.t2.textContent = 'thread = ' + (n.th || 'null');
+          N.t3.textContent = 'ws = ' + n.ws + (WSN[n.ws] || '');
+          N.t3.setAttribute('class', 'mono' + (n.ws === -1 ? ' c-warn' : n.ws === 1 ? ' c-bad' : ''));
+        } else {
+          N.t1.textContent = n.name;
+          N.t2.textContent = 'locked = ' + n.locked;
+          N.t2.setAttribute('class', 'mono ' + (n.locked ? 'c-warn' : 'c-ok'));
+          N.t3.textContent = n.note;
+          N.t3.setAttribute('class', 'small muted');
+        }
+        if (N.fresh || N.g.classList.contains('hide')) {
+          N.g.style.transition = 'none'; move(N.g, NX(k), NY + 110); N.g.getBoundingClientRect(); N.g.style.transition = '';
+          N.fresh = false;
+        }
+        N.g.classList.remove('hide');
+        move(N.g, NX(k), NY);
+      });
+      for (const id in E.nodes) if (!live.has(id) && !E.nodes[id].g.classList.contains('hide')) {
+        const N = E.nodes[id];
+        N.g.classList.add('hide');
+        N.g.style.transform = N.g.style.transform.replace(/,\s*[\d.]+px\)/, `, ${NY - 40}px)`);
+      }
+
+      // 指针、prev/next
+      while (E.links.firstChild) E.links.removeChild(E.links.firstChild);
+      const L = svg('g', { class: 'late' }, E.links);
+      const n = st.nodes.length;
+      if (st.aqs) {
+        for (let k = 0; k + 1 < n; k++) {
+          arrow(L, NX(k) + NW + 1, NY + 32, NX(k + 1) - 2, NY + 32, 'accent');
+          arrow(L, NX(k + 1) - 1, NY + 60, NX(k) + NW + 2, NY + 60, 'accent');
+        }
+        svg('text', { x: NX(0) + 34, y: NY - 8, 'text-anchor': 'middle', class: 'mono small c-accent' }, L, 'head ↓');
+        svg('text', { x: NX(n - 1) + NW - 34, y: NY - 8, 'text-anchor': 'middle', class: 'mono small c-violet' }, L, 'tail ↓');
+      } else {
+        const k = nodeIdx(st, st.tail);
+        svg('text', { x: NX(k) + NW - 34, y: NY - 8, 'text-anchor': 'middle', class: 'mono small c-violet' }, L, 'tail ↓');
+      }
+
+      // 自旋 / 前驱曲线
+      while (E.curves.firstChild) E.curves.removeChild(E.curves.firstChild);
+      const C = svg('g', { class: 'late' }, E.curves);
+      for (const [who, to, kind] of st.links || []) {
+        const a = tokPos(st, st.toks[who].at), k = nodeIdx(st, to);
+        const bx = NX(k) + NW / 2 + 24, by = NY + NH + 3;
+        const sx = a.x - 30, sy = a.y - 4;
+        svg('path', { d: `M${sx},${sy} C${sx - 50},${sy} ${bx},${by + 50} ${bx},${by}`, class: 'curve ' + kind + (kind === 'spin' ? ' flow' : ''), 'marker-end': `url(#mk-${kind === 'spin' ? 'warn' : 'muted'})` }, C);
+      }
+
+      for (const name in E.toks) {
+        const t = st.toks[name], T = E.toks[name];
+        const p = tokPos(st, t.at);
+        move(T.g, p.x, p.y);
+        T.r.setAttribute('class', 'box anim ' + (t.cls || ''));
+        T.s.textContent = t.s || '';
+        T.s.setAttribute('class', 'small ' + (t.cls && t.cls !== 'soft' ? 'c-' + t.cls : 'muted'));
+      }
+
+      E.result.textContent = st.result || '';
+      E.result.setAttribute('class', 'title ' + (st.resultCls || ''));
+      const prev = E.prev && E.prev.sc === ctx.scenario ? E.prev.st : st;
+      for (const [from, to, label, cls] of step.moves || []) packet(ctx.fx, pt(st, from, prev), pt(st, to, st), label, cls);
+      E.prev = { sc: ctx.scenario, st };
+    },
+  });
+})();
+</script>
+</body>
+</html>

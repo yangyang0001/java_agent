@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Netty 6 · 连接生命周期（建连、心跳、重连与优雅关闭）</title>
+<link rel="stylesheet" href="common.css">
+<style>
+.netty-nav{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:13px}
+.netty-nav a,.sources a{color:var(--accent);text-underline-offset:3px}
+.netty-nav [aria-current]{font-weight:700;text-decoration-thickness:2px}
+.sources{display:flex;flex-wrap:wrap;gap:8px 20px;font-size:13px}
+.stage .mono{font-family:var(--f-mono);font-size:12px}
+.stage .small{font-size:11px}
+.stage .title{font-size:13px}
+.now .desc{overflow-wrap:anywhere}
+@media(max-width:420px){.wrap{padding:18px 10px 32px}.panel{padding:12px}.ctl{flex-wrap:wrap}.controls{padding:10px}.netty-nav{gap:6px 12px}}
+</style>
+</head>
+<body>
+<main class="wrap">
+<header>
+<p class="eyebrow">Netty · 6 / 8 · 连接怎么活</p>
+<h1>连接生命周期（建连、心跳、重连与优雅关闭）</h1>
+<p class="lede">Bootstrap 配置一次连接的创建过程，ChannelOption 控制连接与传输选项；空闲检测、心跳协议、重连和停止是应用需要组织的状态机。IdleStateHandler 只触发空闲事件，不会替你自动发心跳或重连。</p>
+</header>
+<nav class="netty-nav" aria-label="Netty 八个知识单元"><a href="Netty_1_线程模型.html">1. 线程模型</a>
+<a href="Netty_2_处理链.html">2. 处理链</a>
+<a href="Netty_3_内存.html">3. 内存</a>
+<a href="Netty_4_编解码.html">4. 编解码</a>
+<a href="Netty_5_异步结果.html">5. 异步结果</a>
+<a href="Netty_6_连接生命周期.html" aria-current="page">6. 连接生命周期</a>
+<a href="Netty_7_流量控制.html">7. 流量控制</a>
+<a href="Netty_8_传输层.html">8. 传输层</a></nav>
+<section class="controls" id="controls" aria-label="播放控制"></section>
+<div class="grid">
+<section class="panel stage">
+<div class="panel-h"><h2>运行过程与故障对照</h2><div class="legend"><span><i class="sw" style="background:var(--accent)"></i>当前处理</span><span><i class="sw" style="background:var(--warn)"></i>等待 / 压力</span><span><i class="sw" style="background:var(--bad)"></i>错误路径</span></div></div>
+<svg id="svg" viewBox="0 0 700 420" role="img" aria-label="连接生命周期的状态与消息流转动态图"></svg>
+<p class="cap">教学示意，时间与容量不按真实比例。切换场景可对照正常流程与故障；方向键逐步查看，空格暂停或播放。</p>
+</section>
+<aside class="col">
+<section class="panel now" aria-live="polite"><span class="k" id="nowNo"></span><h3 id="nowTitle"></h3><div class="desc" id="nowDesc"></div></section>
+<section class="panel"><div class="panel-h"><h2>关键代码 / 场景片段</h2></div><pre class="code" id="code"></pre></section>
+<section class="panel"><div class="panel-h"><h2>步骤</h2></div><ol class="steps" id="stepList"></ol></section>
+</aside>
+</div>
+<section class="panel notes"><div class="panel-h"><h2>最小知识单元</h2></div><div class="tablewrap"><table><thead><tr><th>概念</th><th>落地边界</th></tr></thead><tbody><tr><td>Bootstrap / ServerBootstrap</td><td>客户端 connect / 服务端 bind；服务端 childOption 作用于接收的子连接。</td></tr>
+<tr><td>IdleStateHandler</td><td>触发空闲事件；心跳消息与关闭策略由后续 Handler 实现。</td></tr>
+<tr><td>重连状态机</td><td>控制并发建连、单一计时器、退避抖动、停止标记以及迟到结果。</td></tr></tbody></table></div></section>
+<section class="panel notes"><div class="panel-h"><h2>常见问题与排查</h2></div><div class="tablewrap"><table><thead><tr><th>现象</th><th>先检查什么 / 如何处理</th></tr></thead><tbody><tr><td>加了 IdleStateHandler 仍没心跳</td><td>实现 userEventTriggered，并定义双方可识别的心跳协议。</td></tr>
+<tr><td>断线后大量同时重连</td><td>加入有上限退避与随机抖动，限制一次只能存在一个重试任务。</td></tr>
+<tr><td>停止后自动复活</td><td>关闭前置 stopped 标记，取消定时器，处理 connect 成功的迟到回调。</td></tr>
+<tr><td>正常连接被误判失活</td><td>检查 EL 阻塞、autoRead=false、阈值和业务层 PONG 匹配策略。</td></tr></tbody></table></div></section>
+<section class="panel"><div class="panel-h"><h2>官方参考 · Netty 4.1</h2></div><div class="sources"><a href="https://netty.io/4.1/api/io/netty/handler/timeout/IdleStateHandler.html" target="_blank" rel="noopener noreferrer">IdleStateHandler</a>
+<a href="https://netty.io/4.1/api/io/netty/bootstrap/Bootstrap.html" target="_blank" rel="noopener noreferrer">Bootstrap</a></div><p class="cap">代码为说明机制的局部片段；示例中的业务类型、线程池、编解码器和指标方法由应用提供，标明伪代码的部分不是完整实现。</p></section>
+</main>
+<script src="player.js"></script>
+<script>window.NETTY_PAGE = {"name":"连接生命周期","mechanism":"建连、心跳、重连与优雅关闭","question":"连接怎么活","kind":"lifecycle","lede":"Bootstrap 配置一次连接的创建过程，ChannelOption 控制连接与传输选项；空闲检测、心跳协议、重连和停止是应用需要组织的状态机。IdleStateHandler 只触发空闲事件，不会替你自动发心跳或重连。","nodes":[["Bootstrap","配置 / connect"],["Channel","注册 / active"],["IdleStateHandler","读空闲 / 写空闲"],["心跳 Handler","PING / PONG / 判活"],["重连调度器","退避 / 抖动 / 单任务"],["停止与释放","关闭 Channel / Group"]],"edges":[[0,1],[1,2],[2,3],[3,4],[4,0],[1,5]],"scenarios":[{"label":"建连与应用层心跳","code":["Bootstrap b = new Bootstrap();","b.group(group).channel(NioSocketChannel.class)"," .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 3000)"," .option(ChannelOption.SO_KEEPALIVE, true)"," .handler(new ChannelInitializer\u003cSocketChannel>() {","   protected void initChannel(SocketChannel ch) {","     // 先配置协议 Decoder / Encoder","     ch.pipeline().addLast(new IdleStateHandler(60, 20, 0));","     ch.pipeline().addLast(new HeartbeatHandler());","   }"," });","// HeartbeatHandler.userEventTriggered 中：","// WRITER_IDLE -> 发协议定义的 PING；READER_IDLE -> 按策略 close","// PING / PONG 必须能被双方的编解码器识别","b.connect(host, port).addListener(connectListener);"],"state":{},"steps":[{"title":"配置后异步 connect","desc":"\u003cp>配置连接超时、Channel 类型和初始化器。CONNECT_TIMEOUT_MILLIS 针对建连，不是业务响应超时。group、host、port 和 listener 由应用提供。\u003c/p>","set":{"values":["connect 中","尚未 active","未启用","等待连接","无重试","运行中"],"status":["accent","","","","",""],"phase":"CONNECTING","retry":"无"},"line":[2,3,15]},{"title":"连接建立并 active","desc":"\u003cp>连接成功后触发 channelActive，初始化连接状态。SO_KEEPALIVE 是操作系统 TCP 保活，不替代应用协议的 PING / PONG。\u003c/p>","set":{"values":["connect 成功","ACTIVE","开始空闲计时","已启用","无重试","运行中"],"status":["","accent","","","",""],"phase":"ACTIVE"},"moves":[[0,1,"connected","ok"]],"line":[4,8,9]},{"title":"写空闲触发事件","desc":"\u003cp>连续 20 秒无写操作，IdleStateHandler 触发 WRITER_IDLE。只有业务 HeartbeatHandler 处理该事件并发送 PING，心跳才真正发出。\u003c/p>","set":{"values":["已连接","ACTIVE","WRITER_IDLE","发送 PING","无重试","运行中"],"status":["","","","accent","",""],"phase":"ACTIVE / 等待判活"},"moves":[[2,3,"idle"]],"line":[8,13]},{"title":"接收 PONG 或正常业务流量","desc":"\u003cp>示例按任何有效入站流量判活。若业务要求必须匹配 PONG，需要额外记录探测 ID、超时和连续失败次数。\u003c/p>","set":{"values":["已连接","ACTIVE","重置读计时","收到 PONG","无重试","运行中"],"status":["","","","accent","",""],"phase":"ACTIVE"},"line":14},{"title":"读空闲达到阈值","desc":"\u003cp>60 秒无读取事件后触发 READER_IDLE。示例策略关闭可疑连接；真实阈值应考虑业务空闲、网络延迟及主动暂停读取。\u003c/p>","set":{"values":["等待连接恢复","关闭连接","READER_IDLE","判定失活","等待统一调度","尚未停止应用"],"status":["","","","","accent",""],"phase":"INACTIVE","retry":"由唯一入口安排"},"moves":[[3,4,"inactive","warn"]],"line":13}]},{"label":"重连状态机与停止竞态","code":["// 伪代码：所有状态修改统一在控制 EventLoop 执行","void scheduleReconnect() {","  if (stopped || connecting || retryTask != null) return;","  long delay = backoffWithJitter(attempt++, maxDelay);","  retryTask = controlLoop.schedule(() -> {","    retryTask = null;","    if (stopped) return;","    connecting = true;","    bootstrap.connect(host, port).addListener(f -> {","      // 将结果归并到 controlLoop 后处理","      // connecting=false；失败调度重连；成功 attempt=0","      // 若 stopped 已为 true，立即关闭新连上的 Channel","    });","  }, delay, TimeUnit.MILLISECONDS);","}","// stop: stopped=true -> cancel retryTask -> close channels","// 等所有 close 完成后 shutdownGracefully 所有自有 group"],"state":{},"steps":[{"title":"断连或首次连接失败","desc":"\u003cp>两种情况都走唯一调度入口。首次 connect 失败不能只依赖业务 Handler 的 channelInactive 兜底，应由 connect Future 明确处理。\u003c/p>","set":{"values":["connect 失败","INACTIVE","停用","清理会话","请求一次重试","未停止"],"status":["","","","","accent",""],"phase":"DISCONNECTED","retry":"准备安排"},"line":[2,3]},{"title":"退避并加入随机抖动","desc":"\u003cp>重试采用有上限的指数退避并加入 jitter，避免大量客户端同时重连。图示 1、2、4 秒只是示意，不是固定推荐参数。\u003c/p>","set":{"values":["尚未 connect","INACTIVE","停用","无心跳","1s → 2s → 4s","未停止"],"status":["","","","","accent",""],"phase":"BACKOFF","retry":"单个延迟任务（含抖动）"},"line":[3,4,5]},{"title":"延迟任务触发一次连接","desc":"\u003cp>connecting 与 retryTask 共同防止并发建连、重复定时器。重连创建新的 Channel，并重新执行 ChannelInitializer。\u003c/p>","set":{"values":["重新 connect","新 Channel","等待 active","待重建","清空 retryTask","未停止"],"status":["accent","","","","",""],"phase":"CONNECTING","retry":"当前任务已触发"},"moves":[[4,0,"retry"]],"line":[6,7,8,9]},{"title":"停止期间连接成功的竞态","desc":"\u003cp>若用户 stop 与 connect 成功交错，回调必须再次检查 stopped 并关闭新 Channel，防止服务停止后又恢复连接。\u003c/p>","set":{"values":["结果回调","关闭迟到连接","停用","停止心跳","取消重试","stopped=true"],"status":["","","","","","accent"],"phase":"STOPPING","retry":"取消且禁止新建"},"moves":[[1,5,"close","warn"]],"line":[12,16]},{"title":"释放自有执行资源","desc":"\u003cp>先停止接入和重试，按业务截止时间排空或失败未完成请求，关闭连接，再释放自有 EventLoopGroup。shutdownGracefully 不自动保证业务请求全部完成。\u003c/p>","set":{"values":["不再连接","CLOSED","已清理","已清理","无定时任务","释放完成"],"status":["","","","","","accent"],"phase":"TERMINATED","retry":"无"},"line":[16,17]}]}],"concepts":[["Bootstrap / ServerBootstrap","客户端 connect / 服务端 bind；服务端 childOption 作用于接收的子连接。"],["IdleStateHandler","触发空闲事件；心跳消息与关闭策略由后续 Handler 实现。"],["重连状态机","控制并发建连、单一计时器、退避抖动、停止标记以及迟到结果。"]],"issues":[["加了 IdleStateHandler 仍没心跳","实现 userEventTriggered，并定义双方可识别的心跳协议。"],["断线后大量同时重连","加入有上限退避与随机抖动，限制一次只能存在一个重试任务。"],["停止后自动复活","关闭前置 stopped 标记，取消定时器，处理 connect 成功的迟到回调。"],["正常连接被误判失活","检查 EL 阻塞、autoRead=false、阈值和业务层 PONG 匹配策略。"]],"sources":[["IdleStateHandler","https://netty.io/4.1/api/io/netty/handler/timeout/IdleStateHandler.html"],["Bootstrap","https://netty.io/4.1/api/io/netty/bootstrap/Bootstrap.html"]]};</script>
+<script src="netty-diagrams.js"></script>
+</body>
+</html>

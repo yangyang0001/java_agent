@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>指令重排动态图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .stage .cur { stroke-width: 2.6; }
+  .stage .chip text { font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">JUC · 8 · Instruction Reordering</p>
+    <h1>指令重排：双重检查锁（DCL）单例为什么要加 volatile</h1>
+    <p class="lede">为了提高性能，编译器和 CPU 会在不改变单线程结果的前提下调整指令顺序。<code>instance = new Singleton()</code> 分三步：分配内存、初始化对象、引用指向内存。后两步可能被重排，另一个线程就会拿到一个还没初始化完成的对象。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>两个线程的时间线与内存</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--line)"></i>虚线：按程序顺序待执行</span>
+            <span><i class="sw" style="background:var(--warn)"></i>未初始化完 / 等待</span>
+            <span><i class="sw" style="background:var(--ok)"></i>正确</span>
+            <span><i class="sw" style="background:var(--bad)"></i>出错</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 462" role="img" aria-label="两个线程调用 getInstance 的时间线，以及 instance 引用和堆中对象的变化"></svg>
+        <p class="cap">时间从上往下走；每一行只有一个线程在执行。右侧是静态字段 <code>instance</code>、堆中的对象和 <code>Singleton.class</code> 锁。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>代码</h2></div>
+        <pre class="code" id="code"></pre>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <ul>
+      <li>指令重排：为了提高性能，在不改变单线程执行结果的前提下，改变指令的执行顺序。</li>
+      <li>三个来源：编译器优化重排 → 处理器指令级并行重排 → 内存系统重排（Store Buffer 导致看起来乱序）。</li>
+      <li>单线程遵守 as-if-serial 语义，有数据依赖的指令不会重排；但多线程下会出问题。</li>
+      <li>DCL 单例：<code>instance = new Singleton()</code> 分 3 步（1 分配内存、2 初始化对象、3 引用指向内存），2 和 3 可能被重排成 1 → 3 → 2，另一个线程在第一次判断时看到 <code>instance != null</code>，拿到的却是没初始化完成的对象。</li>
+      <li>解决：<code>instance</code> 加 <code>volatile</code>。volatile 写前面的 <code>StoreStore</code> 屏障保证初始化先于引用发布；读线程的 volatile 读之后有 <code>LoadLoad</code> / <code>LoadStore</code>。（JDK5 / JSR-133 之后 volatile 才有这个语义。）</li>
+      <li>禁止重排的手段：<code>volatile</code>、<code>synchronized</code>、<code>final</code>（构造函数内的 final 字段写不会逸出）、<code>Unsafe</code> / <code>VarHandle</code> 的屏障方法。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet, move, arrow } = Player;
+  const COLX = [74, 286], CHW = 186, CHH = 26;
+  const ROWY = r => 50 + r * 36;
+  const P = {
+    ref: { x: 722, y: 56 }, obj: { x: 690, y: 152 }, fv: { x: 700, y: 222 }, lock: { x: 700, y: 336 },
+  };
+
+  const code = (vol) => [
+    '// Singleton 的字段、构造函数和方法',
+    vol ? 'static volatile Singleton instance;' : 'static Singleton instance;',
+    'int value; String name;',
+    'private Singleton() {',
+    '  value = 42; name = "ok";',
+    '}',
+    'static Singleton getInstance() {',
+    '  if (instance == null) {',
+    '    synchronized (Singleton.class) {',
+    '      if (instance == null) {',
+    '        instance = new Singleton();',
+    '      }',
+    '    }',
+    '  }',
+    '  return instance;',
+    '}',
+  ];
+
+  const INIT = { ev: {}, row: {}, ref: null, obj: null, lock: { owner: '', wait: '' }, result: '' };
+  const DEF = { v: '0', n: 'null', cls: 'warn', note: '只分配了内存，字段都是默认值' };
+  const OK = { v: '42', n: '"ok"', cls: 'ok', note: '构造函数执行完，初始化完成' };
+
+  const scenarios = [
+    {
+      label: '正常顺序 1 → 2 → 3',
+      code: code(false), vol: false,
+      events: [
+        ['a1', 0, 0, '检查1：null → 继续'], ['a2', 0, 1, '加锁 synchronized'], ['a3', 0, 2, '检查2：null → 创建'],
+        ['i1', 0, 3, '① 分配内存'], ['i2', 0, 4, '② 初始化对象'], ['i3', 0, 5, '③ instance = 引用'], ['a4', 0, 6, '释放锁'],
+        ['b1', 1, 7, '检查1：!= null'], ['b2', 1, 8, '返回，读到 value = 42'],
+      ],
+      state: INIT,
+      steps: [
+        { title: '初始：instance 为 null', desc: '<p>线程 A、B 都要调用 <code>getInstance()</code>。此时 <code>instance == null</code>，堆里还没有对象。</p>', line: [7] },
+        { title: 'A 第一次检查：null', desc: '<p>第一次检查<b>不加锁</b>，目的是对象创建好之后，后续调用不再竞争锁。</p>', line: 8, set: { ev: { a1: 'done' } }, hot: ['a1'] },
+        { title: 'A 加锁并第二次检查', desc: '<p>A 拿到 <code>Singleton.class</code> 锁。加锁后再检查一次，防止在 A 等锁期间别的线程已经创建了对象。</p>', line: [9, 10],
+          set: { ev: { a2: 'done', a3: 'done' }, lock: { owner: '线程 A' } }, hot: ['a2', 'a3'], moves: [['a2', 'lock', '', 'accent']] },
+        { title: '① 分配内存', desc: '<p><code>new</code> 先在堆上分配内存，字段都是默认值：<code>value = 0</code>、<code>name = null</code>。</p>', line: 11,
+          set: { ev: { i1: 'done' }, obj: DEF }, hot: ['i1'], moves: [['i1', 'obj', '', 'accent']] },
+        { title: '② 初始化对象', desc: '<p>执行构造函数：<code>value = 42</code>，<code>name = "ok"</code>。对象这时才是完整可用的。</p>', line: [5, 11],
+          set: { ev: { i2: 'done' }, obj: OK }, hot: ['i2'], moves: [['i2', 'fv', '', 'ok']] },
+        { title: '③ 把引用赋给 instance', desc: '<p>最后才让 <code>instance</code> 指向这块内存。从这一刻起，其他线程才能看到对象。</p>', line: 11,
+          set: { ev: { i3: 'done' }, ref: 'ok' }, hot: ['i3'], moves: [['i3', 'ref', '', 'ok']] },
+        { title: 'A 释放锁', desc: '<p>退出同步块，释放锁。</p>', line: 13, set: { ev: { a4: 'done' }, lock: { owner: '' } }, hot: ['a4'] },
+        { title: 'B 第一次检查：!= null', desc: '<p>B 不加锁直接检查，看到 <code>instance != null</code>，跳过同步块。</p>', line: 8,
+          set: { ev: { b1: 'ok' } }, hot: ['b1'], moves: [['ref', 'b1', '', 'ok']] },
+        { title: 'B 返回并使用对象', desc: '<p>对象已经初始化完成，B 读到 <code>value = 42</code>、<code>name = "ok"</code>。</p><p class="ok">按 1 → 2 → 3 的顺序执行，一切正常。</p>', line: 15,
+          set: { ev: { b2: 'ok' } }, hot: ['b2'], moves: [['fv', 'b2', '', 'ok']] },
+        { title: '小结：顺序正确时没有问题', desc: '<p>问题在于：② 和 ③ 之间<b>没有数据依赖</b>，编译器和 CPU 可以交换它们的顺序。下一个场景看重排后会发生什么。</p>',
+          set: { result: '1 分配内存 → 2 初始化 → 3 发布引用：B 拿到完整对象', resultCls: 'c-ok' }, dwell: 3600 },
+      ],
+    },
+    {
+      label: '重排为 1 → 3 → 2（出错）',
+      code: code(false), vol: false,
+      events: [
+        ['a1', 0, 0, '检查1、加锁、检查2'], ['i1', 0, 1, '① 分配内存'], ['i2', 0, 2, '② 初始化对象'], ['i3', 0, 3, '③ instance = 引用'],
+        ['b1', 1, 3, '检查1：!= null → 返回'], ['b2', 1, 4, 'name.length() → NPE'], ['a4', 0, 6, '释放锁'],
+      ],
+      state: INIT,
+      steps: [
+        { title: '初始：instance 为 null', desc: '<p>同样的代码，同样两个线程。这次 <code>instance</code> 没有加 <code>volatile</code>。</p>', line: 2 },
+        { title: 'A 检查、加锁、再检查', desc: '<p>A 通过两次检查，持有锁，准备创建对象。</p>', line: [8, 9, 10],
+          set: { ev: { a1: 'done' }, lock: { owner: '线程 A' } }, hot: ['a1'], moves: [['a1', 'lock', '', 'accent']] },
+        { title: 'new 的三步（程序顺序）', desc: '<p><code>instance = new Singleton()</code> 不是原子操作，而是三步：</p><p>① 分配内存　② 初始化对象　③ 引用指向内存</p>', line: 11,
+          set: { ev: { i1: 'ghost', i2: 'ghost', i3: 'ghost' } }, hot: [] },
+        { title: '指令重排：③ 跑到 ② 前面', desc: '<p>② 和 ③ 没有数据依赖，单线程下先赋值后初始化结果一样（as-if-serial），所以 JIT 或 CPU 可以重排成 <b class="bad">1 → 3 → 2</b>。</p>', line: 11, badLine: 11,
+          set: { row: { i3: 2, i2: 3 } }, hot: ['i2', 'i3'] },
+        { title: 'A 执行 ① 分配内存', desc: '<p>堆上有了对象，字段还是默认值。</p>', line: 11,
+          set: { ev: { i1: 'done' }, obj: DEF }, hot: ['i1'], moves: [['i1', 'obj', '', 'accent']] },
+        { title: 'A 先执行 ③：引用已发布', desc: '<p><code>instance</code> 已经指向这块内存，但构造函数<b>还没执行</b>。</p><p class="warn">这是一个“半初始化”的对象。</p>', line: 11, badLine: 11,
+          set: { ev: { i3: 'warn' }, ref: 'warn', obj: { note: '半初始化：引用已发布，字段还是默认值' } }, hot: ['i3'], moves: [['i3', 'ref', '', 'warn']] },
+        { title: 'B 第一次检查：!= null', desc: '<p>B 的第一次检查在<b>锁外面</b>，不需要等 A 的锁。它看到 <code>instance != null</code>，直接跳过同步块返回。</p><p class="bad">锁对 B 完全没有约束。</p>', badLine: 8,
+          set: { ev: { b1: 'bad' }, row: { i2: 5 } }, hot: ['b1'], moves: [['ref', 'b1', '', 'bad']] },
+        { title: 'B 使用对象：读到默认值', desc: '<p>B 读到 <code>value = 0</code>、<code>name = null</code>，调用 <code>name.length()</code> 抛出 <b class="bad">NullPointerException</b>。</p>', badLine: 15,
+          set: { ev: { b2: 'bad' }, obj: { cls: 'bad', note: 'B 读到了未初始化的字段' } }, hot: ['b2'], moves: [['fv', 'b2', '', 'bad']] },
+        { title: 'A 这时才执行 ② 初始化', desc: '<p>构造函数终于执行完，但 B 已经拿着半初始化的对象出错了。</p>', line: [5, 11],
+          set: { ev: { i2: 'warn' }, obj: { v: '42', n: '"ok"', cls: 'warn', note: '初始化完成，但为时已晚' } }, hot: ['i2'], moves: [['i2', 'fv', '', 'warn']] },
+        { title: '结论：DCL 不加 volatile 不安全', desc: '<p>重排后，B 在锁外看到了非空的引用，却看不到构造函数里的写入。</p><p>解决办法：给 <code>instance</code> 加 <code>volatile</code>，禁止这个重排。</p>',
+          set: { ev: { a4: 'done' }, lock: { owner: '' }, result: '1 → 3 → 2：B 拿到半初始化对象', resultCls: 'c-bad' }, hot: ['a4'], dwell: 3600 },
+      ],
+    },
+    {
+      label: '加 volatile：禁止重排',
+      code: code(true), vol: true,
+      events: [
+        ['a1', 0, 0, '检查1、加锁、检查2'], ['i1', 0, 1, '① 分配内存'], ['b1', 1, 2, '检查1：null → 等锁'], ['i2', 0, 3, '② 初始化对象'],
+        ['sb', 0, 4, 'StoreStore 屏障'], ['i3', 0, 5, '③ volatile 写 instance'], ['sl', 0, 6, 'StoreLoad 屏障'], ['a4', 0, 7, '释放锁'],
+        ['b2', 1, 8, '拿到锁，检查2：!= null'], ['b3', 1, 9, '返回，读到 value = 42'],
+      ],
+      state: INIT,
+      steps: [
+        { title: '初始：instance 声明为 volatile', desc: '<p><code>instance</code> 加上 <code>volatile</code>。JVM 会在对它的写前面插入 <b>StoreStore</b>，后面插入 <b>StoreLoad</b>。</p>', line: 2 },
+        { title: 'A 检查、加锁、再检查', desc: '<p>和之前一样，A 持有锁，准备创建对象。</p>', line: [8, 9, 10],
+          set: { ev: { a1: 'done', i2: 'ghost', i3: 'ghost' }, lock: { owner: '线程 A' } }, hot: ['a1'], moves: [['a1', 'lock', '', 'accent']] },
+        { title: 'A 执行 ① 分配内存', desc: '<p>堆上分配对象，字段为默认值。此时 <code>instance</code> 仍是 null。</p>', line: 11,
+          set: { ev: { i1: 'done' }, obj: DEF }, hot: ['i1'], moves: [['i1', 'obj', '', 'accent']] },
+        { title: 'B 第一次检查：null → 等锁', desc: '<p>引用还没发布，B 看到 <code>instance == null</code>，进入同步块，但锁被 A 持有，<b class="warn">阻塞等待</b>。</p>', line: [8, 9],
+          set: { ev: { b1: 'warn' }, lock: { wait: '线程 B' } }, hot: ['b1'], moves: [['b1', 'lock', '', 'warn']] },
+        { title: 'A 执行 ② 初始化对象', desc: '<p>构造函数执行：<code>value = 42</code>、<code>name = "ok"</code>。这些都是普通写。</p>', line: [5, 11],
+          set: { ev: { i2: 'done' }, obj: OK }, hot: ['i2'], moves: [['i2', 'fv', '', 'ok']] },
+        { title: 'StoreStore 屏障', desc: '<p>volatile 写之前的 StoreStore 屏障：上面的普通写（构造函数里的字段赋值）必须<b>先于</b>下面的 volatile 写对其他线程可见。</p><p class="ok">③ 不能再跑到 ② 前面。</p>', line: 11,
+          set: { ev: { sb: 'warn' } }, hot: ['sb'] },
+        { title: '③ volatile 写 instance', desc: '<p>引用发布时，对象一定已经初始化完成。随后的 StoreLoad 屏障让这次写对所有线程立即可见。</p>', line: 11,
+          set: { ev: { i3: 'ok', sl: 'warn' }, ref: 'ok' }, hot: ['i3', 'sl'], moves: [['i3', 'ref', '', 'ok']] },
+        { title: 'A 释放锁，B 拿到锁', desc: '<p>A 退出同步块；B 被唤醒并拿到锁，第二次检查发现 <code>instance != null</code>，不会重复创建。</p>', line: [10, 13],
+          set: { ev: { a4: 'done', b2: 'ok' }, lock: { owner: '线程 B', wait: '' } }, hot: ['a4', 'b2'], moves: [['ref', 'b2', '', 'ok']] },
+        { title: 'B 返回完整对象', desc: '<p>B 读到 <code>value = 42</code>、<code>name = "ok"</code>。</p><p>之后的线程即使不加锁，在第一次检查就读到非空引用，也一定能看到完整对象：volatile 写 happens-before 之后对它的读。</p>', line: 15,
+          set: { ev: { b3: 'ok' }, lock: { owner: '' } }, hot: ['b3'], moves: [['fv', 'b3', '', 'ok']] },
+        { title: '小结：volatile 禁止 2、3 重排', desc: '<p>volatile 写前的 <code>StoreStore</code> 保证初始化先于引用发布；读线程 volatile 读之后的 <code>LoadLoad</code> / <code>LoadStore</code> 保证读到的字段不早于引用。</p>',
+          set: { result: 'volatile：初始化一定先于引用发布', resultCls: 'c-ok' }, dwell: 3600 },
+      ],
+    },
+  ];
+
+  let E;
+  const rowOf = (st, ev) => st.row[ev[0]] !== undefined ? st.row[ev[0]] : ev[2];
+  const STATUS = { ghost: 'box soft dashed', done: 'box', ok: 'box ok', warn: 'box warn', bad: 'box bad', accent: 'box accent' };
+  const TXT = { ghost: 'muted', ok: 'c-ok', warn: 'c-warn', bad: 'c-bad' };
+
+  Player({
+    scenarios,
+    dwell: 2800,
+    init(g, ctx) {
+      const sc = scenarios[ctx.scenario];
+      E = { chips: {} };
+      // 时间线区域
+      svg('rect', { x: 16, y: 8, width: 476, height: 410, rx: 10, class: 'box soft' }, g);
+      svg('text', { x: 30, y: 34, class: 'small muted' }, g, '时间 ↓');
+      ['线程 A', '线程 B'].forEach((name, c) => {
+        svg('text', { x: COLX[c] + CHW / 2, y: 34, 'text-anchor': 'middle', class: 'title' }, g, name);
+        svg('line', { x1: COLX[c] + CHW / 2, y1: 44, x2: COLX[c] + CHW / 2, y2: 406, class: 'wire dashed' }, g);
+      });
+      for (let r = 0; r < 10; r++) svg('text', { x: 30, y: ROWY(r) + 17, class: 'mono small muted' }, g, 't' + (r + 1));
+      for (const ev of sc.events) {
+        const [k, col, row, label] = ev;
+        const cg = svg('g', { class: 'anim chip hide' }, g);
+        move(cg, COLX[col], ROWY(row));
+        const r = svg('rect', { x: 0, y: 0, width: CHW, height: CHH, rx: 5, class: 'box anim' }, cg);
+        const t = svg('text', { x: CHW / 2, y: 17, 'text-anchor': 'middle' }, cg, label);
+        E.chips[k] = { g: cg, r, t, col, ev };
+      }
+      // 静态字段 instance
+      E.refBox = svg('rect', { x: 508, y: 8, width: 236, height: 72, rx: 8, class: 'box anim' }, g);
+      svg('text', { x: 522, y: 30, class: 'small muted' }, g, sc.vol ? '静态字段 volatile instance' : '静态字段 instance');
+      E.ref = svg('text', { x: 522, y: 62, class: 'mono' }, g, '');
+      // 堆
+      svg('rect', { x: 508, y: 96, width: 236, height: 208, rx: 8, class: 'box' }, g);
+      svg('text', { x: 522, y: 116, class: 'small muted' }, g, '堆');
+      E.arrow = arrow(g, 600, 80, 600, 128, 'ok');
+      E.arrow.classList.add('anim');
+      E.obj = svg('g', { class: 'anim hide' }, g);
+      E.objBox = svg('rect', { x: 524, y: 128, width: 204, height: 164, rx: 8, class: 'box anim' }, E.obj);
+      svg('text', { x: 538, y: 152, class: 'title' }, E.obj, 'Singleton 对象');
+      svg('rect', { x: 536, y: 162, width: 180, height: 24, rx: 4, class: 'box soft' }, E.obj);
+      svg('text', { x: 546, y: 178, class: 'small muted' }, E.obj, '对象头（Mark Word、Klass）');
+      E.fields = [['value', 196], ['name', 228]].map(([name, y]) => {
+        const r = svg('rect', { x: 536, y, width: 180, height: 26, rx: 4, class: 'box anim' }, E.obj);
+        svg('text', { x: 546, y: y + 17, class: 'mono small' }, E.obj, name);
+        const v = svg('text', { x: 612, y: y + 17, class: 'mono' }, E.obj, '');
+        return { r, v };
+      });
+      E.note = svg('text', { x: 536, y: 276, class: 'small' }, E.obj, '');
+      // 锁
+      E.lockBox = svg('rect', { x: 508, y: 318, width: 236, height: 100, rx: 8, class: 'box anim' }, g);
+      svg('text', { x: 522, y: 340, class: 'small muted' }, g, '锁 Singleton.class');
+      E.owner = svg('text', { x: 522, y: 366, class: '' }, g, '');
+      E.wait = svg('text', { x: 522, y: 394, class: 'c-warn' }, g, '');
+      E.result = svg('text', { x: 380, y: 446, 'text-anchor': 'middle', class: 'title' }, g, '');
+    },
+    render(st, step, i, ctx) {
+      const hot = step.hot || [];
+      const pos = {};
+      for (const k in E.chips) {
+        const c = E.chips[k];
+        const status = st.ev[k];
+        const row = rowOf(st, c.ev);
+        move(c.g, COLX[c.col], ROWY(row));
+        c.g.classList.toggle('hide', !status);
+        c.r.setAttribute('class', 'anim ' + (STATUS[status] || 'box') + (hot.includes(k) ? ' cur' : ''));
+        c.t.setAttribute('class', TXT[status] || '');
+        pos[k] = { x: COLX[c.col] + CHW + 8, y: ROWY(row) + 13 };
+      }
+      // instance 引用
+      E.ref.textContent = st.ref ? '→ 0x4e25（非 null）' : 'null';
+      E.ref.setAttribute('class', 'mono ' + (st.ref === 'ok' ? 'c-ok' : st.ref === 'warn' ? 'c-warn' : 'muted'));
+      E.refBox.setAttribute('class', 'box anim ' + (st.ref || ''));
+      E.arrow.classList.toggle('hide', !st.ref);
+      // 对象
+      E.obj.classList.toggle('hide', !st.obj);
+      if (st.obj) {
+        E.objBox.setAttribute('class', 'box anim ' + st.obj.cls);
+        [st.obj.v, st.obj.n].forEach((v, k) => {
+          E.fields[k].v.textContent = '= ' + v;
+          E.fields[k].r.setAttribute('class', 'box anim ' + st.obj.cls);
+        });
+        E.note.textContent = st.obj.note;
+        E.note.setAttribute('class', 'small c-' + st.obj.cls);
+      }
+      // 锁
+      E.owner.textContent = st.lock.owner ? '持有者：' + st.lock.owner : '持有者：无';
+      E.owner.setAttribute('class', st.lock.owner ? 'c-accent' : 'muted');
+      E.wait.textContent = st.lock.wait ? '阻塞等待：' + st.lock.wait : '';
+      E.lockBox.setAttribute('class', 'box anim ' + (st.lock.wait ? 'warn' : st.lock.owner ? 'accent' : ''));
+      E.result.textContent = st.result || '';
+      E.result.setAttribute('class', 'title ' + (st.resultCls || ''));
+      const at = k => pos[k] || P[k];
+      for (const [from, to, label, cls] of step.moves || []) packet(ctx.fx, at(from), at(to), label, cls);
+    },
+  });
+})();
+</script>
+</body>
+</html>

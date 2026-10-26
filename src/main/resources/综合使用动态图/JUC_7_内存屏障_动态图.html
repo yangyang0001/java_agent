@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>内存屏障动态图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">JUC · 7 · Memory Barrier</p>
+    <h1>内存屏障：Store Buffer、失效队列与 volatile</h1>
+    <p class="lede">CPU 写数据时先放进 Store Buffer，不等其他核确认就继续执行；收到的失效请求也先放进 Invalidate Queue，稍后才处理。这两个优化让别的核暂时看不到新值，从外部看就像指令被重排了。内存屏障强制清空 Store Buffer、处理完失效队列，从而保证可见性和顺序。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>两个 CPU 核心与主内存</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--warn)"></i>还在 Store Buffer / 队列中，别的核看不到</span>
+            <span><i class="sw" style="background:var(--ok)"></i>已经全局可见</span>
+            <span><i class="sw" style="background:var(--bad)"></i>读到了旧值</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 470" role="img" aria-label="两个 CPU 的 Store Buffer、缓存、失效队列和主内存之间的数据流动"></svg>
+        <p class="cap">动画是示意：真实硬件中缓存行按 MESI 协议在核之间传递，这里把同步过程简化为"刷到主内存 + 发送失效消息"。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>屏障</th><th>示例</th><th>保证</th></tr></thead>
+        <tbody>
+          <tr><td><code>LoadLoad</code></td><td><code>Load1; LoadLoad; Load2</code></td><td>Load1 先于 Load2 读取</td></tr>
+          <tr><td><code>StoreStore</code></td><td><code>Store1; StoreStore; Store2</code></td><td>Store1 先于 Store2 对其他处理器可见</td></tr>
+          <tr><td><code>LoadStore</code></td><td><code>Load1; LoadStore; Store2</code></td><td>Load1 先于 Store2</td></tr>
+          <tr><td><code>StoreLoad</code></td><td><code>Store1; StoreLoad; Load2</code></td><td>Store1 对所有处理器可见后再执行 Load2；开销最大，兼具其他三种效果</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul style="margin-top:10px">
+      <li>volatile 写：前面插 <code>StoreStore</code>，后面插 <code>StoreLoad</code>；volatile 读：后面插 <code>LoadLoad</code> 和 <code>LoadStore</code>。</li>
+      <li>x86 是强内存模型（TSO），只会发生 Store-Load 重排，所以只需要 StoreLoad 屏障，HotSpot 用 <code>lock addl $0x0,(%rsp)</code> 实现。</li>
+      <li>volatile 的可见性 = MESI（硬件保证最终一致）+ 内存屏障（保证及时可见、禁止重排）。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet } = Player;
+  const X0 = c => 16 + c * 376;
+  // 动画包裹的起点 / 终点
+  const A = {
+    core0: { x: X0(0) + 250, y: 150 }, core1: { x: X0(1) + 250, y: 150 },
+    sb0: { x: X0(0) + 250, y: 200 }, sb1: { x: X0(1) + 250, y: 200 },
+    cache0: { x: X0(0) + 250, y: 242 }, cache1: { x: X0(1) + 250, y: 242 },
+    iq0: { x: X0(0) + 250, y: 284 }, iq1: { x: X0(1) + 250, y: 284 },
+    reg0: { x: X0(0) + 210, y: 166 }, reg1: { x: X0(1) + 210, y: 166 },
+    mem: { x: 380, y: 404 },
+  };
+  const BARRIER = /屏障/;
+
+  const S1 = { pc: [-1, -1], sb: [[], []], iq: [[], []], cache: [{ x: 0, y: 0 }, { x: 0, y: 0 }], mem: { x: 0, y: 0 }, reg: ['r1 = ?', 'r2 = ?'], result: '' };
+  const S3 = { pc: [-1, -1], sb: [[], []], iq: [[], []], cache: [{ data: 0, ready: 'false' }, { data: 0, ready: 'false' }], mem: { data: 0, ready: 'false' }, reg: ['', ''], result: '' };
+
+  const scenarios = [
+    {
+      label: '无屏障：Store-Load 重排',
+      init: 'x = 0, y = 0',
+      threads: [{ name: 'CPU 0 · 线程 1', lines: ['x = 1;', 'r1 = y;'] }, { name: 'CPU 1 · 线程 2', lines: ['y = 1;', 'r2 = x;'] }],
+      state: S1,
+      steps: [
+        { title: '初始状态', desc: '<p><code>x = 0</code>、<code>y = 0</code>，两个核的缓存里都有 x、y 的副本。两个线程都是先写一个变量，再读另一个变量，<b>没有任何同步</b>。</p>' },
+        { title: 'CPU 0 执行 x = 1', desc: '<p>写操作先放进 CPU 0 的 <b>Store Buffer</b>，不等 CPU 1 回复失效确认就继续往下执行。</p><p class="warn">此时 CPU 1 看不到 x = 1。</p>',
+          set: { pc: [0, -1], sb: [['x=1'], []] }, hot: { sb0: 'warn' }, moves: [['core0', 'sb0', 'x=1', 'warn']] },
+        { title: 'CPU 1 执行 y = 1', desc: '<p>同样，y = 1 只进入了 CPU 1 自己的 Store Buffer。</p>',
+          set: { pc: [0, 0], sb: [['x=1'], ['y=1']] }, hot: { sb0: 'warn', sb1: 'warn' }, moves: [['core1', 'sb1', 'y=1', 'warn']] },
+        { title: 'CPU 0 执行 r1 = y，读到 0', desc: '<p>CPU 0 从自己的缓存读 y。CPU 1 写的 <code>y = 1</code> 还停在 CPU 1 的 Store Buffer 里，所以读到旧值 <b class="bad">0</b>。</p>',
+          set: { pc: [1, 0], reg: ['r1 = 0', 'r2 = ?'] }, hot: { cache0: 'bad', sb1: 'warn' }, moves: [['cache0', 'reg0', 'y=0', 'bad']] },
+        { title: 'CPU 1 执行 r2 = x，读到 0', desc: '<p>同理，<code>x = 1</code> 还在 CPU 0 的 Store Buffer 里，CPU 1 读到 <b class="bad">0</b>。</p>',
+          set: { pc: [1, 1], reg: ['r1 = 0', 'r2 = 0'] }, hot: { cache1: 'bad', sb0: 'warn' }, moves: [['cache1', 'reg1', 'x=0', 'bad']] },
+        { title: 'Store Buffer 稍后才刷出', desc: '<p>两个写操作这时才离开 Store Buffer，变为全局可见，但两次读早已结束。</p>',
+          set: { sb: [[], []], cache: [{ x: 1, y: 'I' }, { x: 'I', y: 1 }], mem: { x: 1, y: 1 } }, hot: { mem: 'ok' }, moves: [['sb0', 'mem', 'x=1', 'ok'], ['sb1', 'mem', 'y=1', 'ok']] },
+        { title: '结果：r1 = 0 且 r2 = 0', desc: '<p>按程序顺序，任何一种交错都至少有一个线程能读到 1。出现 <b class="bad">r1 = r2 = 0</b>，看起来就像 <code>r1 = y</code> 跑到了 <code>x = 1</code> 前面。</p><p>这就是 <b>Store-Load 重排</b>，x86 上也会发生。</p>',
+          set: { result: '结果 r1 = 0, r2 = 0：发生了 Store-Load 重排', resultCls: 'c-bad' }, dwell: 3600 },
+      ],
+    },
+    {
+      label: '加 StoreLoad 屏障（volatile）',
+      init: 'x = 0, y = 0',
+      threads: [{ name: 'CPU 0 · 线程 1', lines: ['x = 1;          // volatile 写', '—— StoreLoad 屏障 ——', 'r1 = y;'] },
+                { name: 'CPU 1 · 线程 2', lines: ['y = 1;          // volatile 写', '—— StoreLoad 屏障 ——', 'r2 = x;'] }],
+      state: S1,
+      steps: [
+        { title: '初始状态', desc: '<p>把 x、y 声明为 <code>volatile</code>，JVM 会在每个 volatile 写后面插入 <b>StoreLoad 屏障</b>。</p>' },
+        { title: 'CPU 0 执行 x = 1', desc: '<p>写操作照样先进入 Store Buffer。</p>',
+          set: { pc: [0, -1], sb: [['x=1'], []] }, hot: { sb0: 'warn' }, moves: [['core0', 'sb0', 'x=1', 'warn']] },
+        { title: 'CPU 0 遇到 StoreLoad 屏障', desc: '<p>屏障要求：<b>Store Buffer 清空之前，后面的读不许执行</b>。</p><p><code>x = 1</code> 被刷出变为全局可见，同时通过总线向 CPU 1 发送 x 的失效消息。</p>',
+          set: { pc: [1, -1], sb: [[], []], cache: [{ x: 1, y: 0 }, { x: 0, y: 0 }], mem: { x: 1, y: 0 }, iq: [[], ['失效 x']] }, hot: { sb0: 'ok', mem: 'ok', iq1: 'warn' }, moves: [['sb0', 'mem', 'x=1', 'ok'], ['mem', 'iq1', '失效 x', 'warn']] },
+        { title: 'CPU 1 处理失效队列', desc: '<p>CPU 1 把缓存中的 x 标记为失效（I），以后读 x 必须重新加载。</p>',
+          set: { iq: [[], []], cache: [{ x: 1, y: 0 }, { x: 'I', y: 0 }] }, hot: { cache1: 'warn' } },
+        { title: 'CPU 1 执行 y = 1 并经过屏障', desc: '<p>同样的流程：y = 1 进入 Store Buffer，StoreLoad 屏障把它刷出，并让 CPU 0 缓存中的 y 失效。</p>',
+          set: { pc: [1, 1], cache: [{ x: 1, y: 'I' }, { x: 'I', y: 1 }], mem: { x: 1, y: 1 } }, hot: { mem: 'ok', cache0: 'warn' }, moves: [['core1', 'mem', 'y=1', 'ok']] },
+        { title: 'CPU 0 执行 r1 = y，读到 1', desc: '<p>缓存中的 y 已失效，CPU 0 从总线重新加载，读到最新值 <b class="ok">1</b>。</p>',
+          set: { pc: [2, 1], reg: ['r1 = 1', 'r2 = ?'], cache: [{ x: 1, y: 1 }, { x: 'I', y: 1 }] }, hot: { cache0: 'ok' }, moves: [['mem', 'reg0', 'y=1', 'ok']] },
+        { title: 'CPU 1 执行 r2 = x，读到 1', desc: '<p>同理，CPU 1 重新加载 x，读到 <b class="ok">1</b>。</p>',
+          set: { pc: [2, 2], reg: ['r1 = 1', 'r2 = 1'], cache: [{ x: 1, y: 1 }, { x: 1, y: 1 }] }, hot: { cache1: 'ok' }, moves: [['mem', 'reg1', 'x=1', 'ok']] },
+        { title: '结果：不可能两个都是 0', desc: '<p>有了 StoreLoad 屏障，每个线程的写在它后面的读之前一定已经全局可见，所以 <b class="ok">r1 = r2 = 0 不可能出现</b>。</p><p>代价是 CPU 要等 Store Buffer 清空，这也是 StoreLoad 开销最大的原因。</p>',
+          set: { result: '结果 r1 = 1, r2 = 1：StoreLoad 屏障禁止了重排', resultCls: 'c-ok' }, dwell: 3600 },
+      ],
+    },
+    {
+      label: 'volatile 标志位：data + ready',
+      init: 'data = 0, ready = false',
+      threads: [{ name: 'CPU 0 · 线程 A（写）', lines: ['data = 42;       // 普通写', '—— StoreStore 屏障 ——', 'ready = true;    // volatile 写', '—— StoreLoad 屏障 ——'] },
+                { name: 'CPU 1 · 线程 B（读）', lines: ['if (ready) {    // volatile 读', '—— LoadLoad / LoadStore 屏障 ——', '    print(data);', '}'] }],
+      state: S3,
+      steps: [
+        { title: '初始状态', desc: '<p>线程 A 先准备数据，再把 volatile 标志 <code>ready</code> 置为 true；线程 B 看到 ready 为 true 后读取 data。</p>' },
+        { title: 'A 执行 data = 42', desc: '<p>普通写，进入 Store Buffer。</p><p class="warn">如果没有屏障，data 可能比 ready 更晚刷出，B 就会读到 data = 0。</p>',
+          set: { pc: [0, -1], sb: [['data=42'], []] }, hot: { sb0: 'warn' }, moves: [['core0', 'sb0', 'data=42', 'warn']] },
+        { title: 'A 经过 StoreStore 屏障', desc: '<p>保证上面的普通写 <b>先于</b> 下面的 volatile 写对其他核可见：<code>data = 42</code> 先被刷出，并让 B 缓存中的 data 失效。</p>',
+          set: { pc: [1, -1], sb: [[], []], cache: [{ data: 42, ready: 'false' }, { data: 0, ready: 'false' }], mem: { data: 42, ready: 'false' }, iq: [[], ['失效 data']] }, hot: { mem: 'ok', iq1: 'warn' }, moves: [['sb0', 'mem', 'data=42', 'ok'], ['mem', 'iq1', '失效 data', 'warn']] },
+        { title: 'A 执行 ready = true', desc: '<p>volatile 写，同样先进入 Store Buffer。</p>',
+          set: { pc: [2, -1], sb: [['ready=true'], []] }, hot: { sb0: 'warn' }, moves: [['core0', 'sb0', 'ready=true', 'warn']] },
+        { title: 'A 经过 StoreLoad 屏障', desc: '<p>清空 Store Buffer，<code>ready = true</code> 变为全局可见，并让 B 缓存中的 ready 失效。</p>',
+          set: { pc: [3, -1], sb: [[], []], cache: [{ data: 42, ready: 'true' }, { data: 0, ready: 'false' }], mem: { data: 42, ready: 'true' }, iq: [[], ['失效 data', '失效 ready']] }, hot: { mem: 'ok', iq1: 'warn' }, moves: [['sb0', 'mem', 'ready=true', 'ok'], ['mem', 'iq1', '失效 ready', 'warn']] },
+        { title: 'B 执行 volatile 读 ready', desc: '<p>volatile 读要读到最新值：先处理完失效队列，data 和 ready 的副本都失效，再从总线加载 <code>ready = true</code>。</p>',
+          set: { pc: [-1, 0], iq: [[], []], cache: [{ data: 42, ready: 'true' }, { data: 'I', ready: 'true' }], reg: ['', 'ready = true'] }, hot: { iq1: 'ok', cache1: 'warn' }, moves: [['mem', 'reg1', 'ready=true', 'ok']] },
+        { title: 'B 经过 LoadLoad / LoadStore 屏障', desc: '<p>保证下面的读写不会被重排到 volatile 读之前，也不会使用失效队列中还没处理的旧数据。</p>',
+          set: { pc: [-1, 1] } },
+        { title: 'B 读取 data，一定是 42', desc: '<p>data 的副本已失效，重新加载得到 <b class="ok">42</b>。</p><p>happens-before 链：<code>data = 42</code> →（程序顺序）<code>ready = true</code> →（volatile 规则）读 ready →（程序顺序）读 data。</p>',
+          set: { pc: [-1, 2], reg: ['', 'data = 42'], cache: [{ data: 42, ready: 'true' }, { data: 42, ready: 'true' }], result: 'B 打印 42：volatile 保证了 data 的可见性', resultCls: 'c-ok' }, hot: { cache1: 'ok' }, moves: [['mem', 'reg1', 'data=42', 'ok']], dwell: 3600 },
+      ],
+    },
+  ];
+
+  let E;   // 当前场景的可变元素
+  const fmtVars = o => Object.entries(o).map(([k, v]) => v === 'I' ? `${k}: 失效` : `${k} = ${v}`).join('    ');
+
+  Player({
+    scenarios,
+    dwell: 2800,
+    init(g, ctx) {
+      const sc = scenarios[ctx.scenario];
+      E = { lines: [[], []], boxes: {} };
+      for (let c = 0; c < 2; c++) {
+        const x0 = X0(c);
+        svg('rect', { x: x0, y: 8, width: 352, height: 304, rx: 10, class: 'box soft' }, g);
+        svg('text', { x: x0 + 14, y: 32, class: 'title' }, g, sc.threads[c].name);
+        sc.threads[c].lines.forEach((ln, k) => {
+          const y = 42 + k * 24;
+          const hl = svg('rect', { x: x0 + 10, y, width: 332, height: 22, rx: 4, class: 'box anim hide', style: 'fill: var(--accent-soft); stroke: none' }, g);
+          const t = svg('text', { x: x0 + 18, y: y + 15, class: 'mono' + (BARRIER.test(ln) ? ' c-warn' : '') }, g, ln);
+          E.lines[c].push({ hl, t });
+        });
+        E['reg' + c] = svg('text', { x: x0 + 14, y: 172, class: 'mono c-accent' }, g, '');
+        const rows = [['sb', 'Store Buffer', 184], ['cache', 'Cache', 226], ['iq', 'Invalidate Queue', 268]];
+        for (const [id, label, y] of rows) {
+          E.boxes[id + c] = svg('rect', { x: x0 + 12, y, width: 328, height: 34, rx: 6, class: 'box anim' }, g);
+          svg('text', { x: x0 + 22, y: y + 22, class: 'small muted' }, g, label);
+          E[id + c] = svg('text', { x: x0 + 128, y: y + 22, class: 'mono' }, g, '');
+        }
+        svg('line', { x1: x0 + 176, y1: 312, x2: x0 + 176, y2: 340, class: 'wire' }, g);
+      }
+      svg('line', { x1: 40, y1: 340, x2: 720, y2: 340, class: 'wire', style: 'stroke-width: 3' }, g);
+      svg('text', { x: 380, y: 358, 'text-anchor': 'middle', class: 'small muted' }, g, '总线（嗅探）');
+      svg('line', { x1: 380, y1: 362, x2: 380, y2: 374, class: 'wire' }, g);
+      E.boxes.mem = svg('rect', { x: 220, y: 374, width: 320, height: 58, rx: 8, class: 'box anim' }, g);
+      svg('text', { x: 236, y: 396, class: 'small muted' }, g, '主内存');
+      E.mem = svg('text', { x: 380, y: 418, 'text-anchor': 'middle', class: 'mono' }, g, '');
+      svg('rect', { x: 16, y: 374, width: 192, height: 58, rx: 8, class: 'box accent' }, g);
+      svg('text', { x: 28, y: 396, class: 'small muted' }, g, '初始值');
+      svg('text', { x: 112, y: 418, 'text-anchor': 'middle', class: 'mono c-accent' }, g, sc.init);
+      E.result = svg('text', { x: 380, y: 460, 'text-anchor': 'middle', class: 'title' }, g, '');
+    },
+    render(st, step, i, ctx) {
+      for (let c = 0; c < 2; c++) {
+        E.lines[c].forEach((l, k) => l.hl.classList.toggle('hide', st.pc[c] !== k));
+        E['reg' + c].textContent = st.reg[c] ? '寄存器  ' + st.reg[c] : '';
+        E['sb' + c].textContent = st.sb[c].join('   ') || '（空）';
+        E['cache' + c].textContent = fmtVars(st.cache[c]);
+        E['iq' + c].textContent = st.iq[c].join('   ') || '（空）';
+      }
+      E.mem.textContent = fmtVars(st.mem);
+      for (const id in E.boxes) E.boxes[id].setAttribute('class', 'box anim ' + ((step.hot || {})[id] || ''));
+      E.result.textContent = st.result || '';
+      E.result.setAttribute('class', 'title ' + (st.resultCls || ''));
+      for (const [from, to, label, cls] of step.moves || []) packet(ctx.fx, A[from], A[to], label, cls);
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>一致性哈希与哈希槽</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  /* 节点颜色: A / B / C / D (哈希环), M1..M4 (哈希槽) */
+  .stage .fA { fill: var(--accent); } .stage .fB { fill: var(--violet); } .stage .fC { fill: var(--ok); } .stage .fD { fill: var(--warn); }
+  .stage .fN { fill: var(--muted); opacity: .55; }
+  .stage .sA { stroke: var(--accent); } .stage .sB { stroke: var(--violet); } .stage .sC { stroke: var(--ok); } .stage .sD { stroke: var(--warn); }
+  .stage text.tA { fill: var(--accent); } .stage text.tB { fill: var(--violet); } .stage text.tC { fill: var(--ok); } .stage text.tD { fill: var(--warn); }
+  .stage .ring { fill: none; stroke: var(--line); stroke-width: 10; }
+  .stage .arc { fill: none; stroke-width: 8; opacity: .45; transition: opacity .4s; }
+  .stage .arc-hl { fill: none; stroke-width: 16; opacity: .35; stroke-linecap: round; }
+  .stage .arc-hl.warn { stroke: var(--warn); } .stage .arc-hl.bad { stroke: var(--bad); }
+  .stage text.on-dot { fill: var(--surface); font-weight: 700; font-size: 12px; }
+  .stage .rowhl { fill: var(--warn-soft); }
+  .stage .seg { stroke: var(--surface); stroke-width: 1; }
+  .stage .pin { fill: var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Redis · 1 · Consistent Hashing</p>
+    <h1>一致性哈希环、虚拟节点与 Redis Cluster 哈希槽</h1>
+    <p class="lede">一致性哈希把 0 ~ 2³²-1 的哈希空间首尾相连成一个环，节点和 key 都映射到环上，key 沿顺时针找到的第一个节点就是它的归属。增减节点时只影响环上相邻的一段数据。Redis Cluster 并没有用它，而是用 16384 个哈希槽。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2 id="stageTitle">哈希环</h2>
+          <div class="legend" id="legend"></div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 470" role="img" aria-label="一致性哈希环上节点与 key 的归属变化，以及 Redis Cluster 的哈希槽迁移"></svg>
+        <p class="cap" id="cap">环上的角度代表哈希值，示意图中的哈希值是为演示挑选的，不是真实 IP 的哈希结果。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel"><div class="panel-h"><h2>代码</h2></div><pre class="code" id="code"></pre></section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>方案</th><th>映射方式</th><th>增减节点时</th><th>问题与对策</th></tr></thead>
+        <tbody>
+          <tr><td>普通取模</td><td><code>hash(key) % N</code></td><td>N 一变，几乎所有 key 都要迁移</td><td>不适合需要扩缩容的场景</td></tr>
+          <tr><td>一致性哈希</td><td>0 ~ 2³²-1 成环，key 顺时针找第一个节点</td><td>只影响环上相邻的一段数据</td><td>节点少时数据倾斜，宕机时数据全部压到下一个节点 → 虚拟节点（如每个物理节点 150 个）</td></tr>
+          <tr><td>Redis Cluster 哈希槽</td><td><code>slot = CRC16(key) % 16384</code>，每个主节点负责一部分槽</td><td>扩缩容 = 迁移槽，可以手动控制</td><td>多 key 命令、事务、Lua 要求在同一个槽 → 用 <code>{hash tag}</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul style="margin-top:10px">
+      <li>为什么是 16384：节点间心跳包用 bitmap 携带槽信息，16384 位 = 2KB，大小合适；官方建议集群节点不超过 1000 个，16384 个槽足够。</li>
+      <li>一致性哈希的使用场景：客户端分片（Jedis ShardedJedis）、代理分片（Twemproxy 的 ketama）。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet, move } = Player;
+  const CX = 220, CY = 225, R = 160;
+  const rad = a => a * Math.PI / 180;
+  const pt = (a, r) => ({ x: CX + r * Math.sin(rad(a)), y: CY - r * Math.cos(rad(a)) });
+  const HASH = a => Math.round(a / 360 * 4294967296);
+
+  // ---------- 场景 1 / 2 的节点与 key ----------
+  const NODES1 = { A: { a: 30, p: 'A' }, B: { a: 150, p: 'B' }, C: { a: 260, p: 'C' }, D: { a: 340, p: 'D' } };
+  const KEYS1 = [10, 70, 110, 175, 215, 240, 290, 335].map((a, k) => ({ a, name: 'key' + (k + 1) }));
+  const NODES2 = {
+    A: { a: 10, p: 'A' }, B: { a: 40, p: 'B' }, C: { a: 80, p: 'C' },
+    'A#1': { a: 10, p: 'A', v: 1 }, 'A#2': { a: 190, p: 'A', v: 1 }, 'A#3': { a: 290, p: 'A', v: 1 },
+    'B#1': { a: 40, p: 'B', v: 1 }, 'B#2': { a: 155, p: 'B', v: 1 }, 'B#3': { a: 265, p: 'B', v: 1 },
+    'C#1': { a: 80, p: 'C', v: 1 }, 'C#2': { a: 110, p: 'C', v: 1 }, 'C#3': { a: 215, p: 'C', v: 1 },
+  };
+  const KEYS2 = [...Array(12)].map((_, k) => ({ a: 15 + 30 * k, name: 'k' + (k + 1) }));
+  const VN = ['A#1', 'A#2', 'A#3', 'B#1', 'B#2', 'B#3', 'C#1', 'C#2', 'C#3'];
+  const VN_NOB = VN.filter(v => v[0] !== 'B');
+
+  // ---------- 场景 3: 哈希槽 ----------
+  const BX = 40, BW = 680, BY = 150;
+  const sx = s => BX + s / 16384 * BW;
+  const SEGS = [
+    { id: 'm1', from: 0, to: 5460, m: 'A' }, { id: 'm2', from: 5461, to: 10922, m: 'B' }, { id: 'm3', from: 10923, to: 16383, m: 'C' },
+    { id: 'n1', from: 0, to: 1364, m: 'D' }, { id: 'n2', from: 5461, to: 6826, m: 'D' }, { id: 'n3', from: 10923, to: 12287, m: 'D' },
+  ];
+  const MS = [
+    { id: 'M1', c: 'A', x: 24 }, { id: 'M2', c: 'B', x: 208 }, { id: 'M3', c: 'C', x: 392 }, { id: 'M4', c: 'D', x: 576 },
+  ];
+  const SLOTS0 = { M1: ['0-5460'], M2: ['5461-10922'], M3: ['10923-16383'], M4: [] };
+  const SLOTS1 = { M1: ['1365-5460'], M2: ['6827-10922'], M3: ['12288-16383'], M4: ['0-1364', '5461-6826', '10923-12287'] };
+
+  const scenarios = [
+    {
+      label: '增删节点只影响一段',
+      mode: 'ring', nodes: NODES1, keys: KEYS1,
+      code: ['// 节点和 key 都映射到环上', 'pos(node) = hash("10.0.0.1:6379")', 'pos(key)  = hash("user:1001")', '', '// 顺时针第一个节点', 'node = ring.ceiling(pos(key))', 'if (node == null)', '    node = ring.first() // 绕回 0'],
+      state: { nodes: [], own: null, keys: false, table: 'own', info: [] },
+      steps: [
+        { title: '哈希空间首尾相连成环',
+          desc: '<p>把 <code>0 ~ 2³²-1</code> 的整数空间首尾相连：<code>2³²-1</code> 的下一个位置就是 <code>0</code>，组成一个环。</p><p>环上的位置用角度表示：12 点方向是 0，顺时针增大。</p>',
+          spin: true, set: { info: [['0 ~ 2³²-1 首尾相连', '']] } },
+        { title: '节点按 hash(IP) 放到环上', line: 2,
+          desc: '<p>对每个 Redis 节点的 IP 或名称求哈希，得到它在环上的位置：A、B、C 三个节点。</p>',
+          set: { nodes: ['A', 'B', 'C'], info: [['节点位置 = hash(IP 或名称)', '']] }, pop: ['A', 'B', 'C'] },
+        { title: 'key 按 hash(key) 放到环上', line: 3,
+          desc: '<p>key 用同一个哈希函数映射到环上。右侧列出 8 个 key 的哈希值。</p>',
+          set: { keys: true, info: [['key 位置 = hash(key)', '']] } },
+        { title: '顺时针找到的第一个节点就是归属', line: [6, 7, 8],
+          desc: '<p>从 key 的位置出发 <b>顺时针</b> 走，遇到的第一个节点就是它所在的节点。</p><p>每个节点负责从 <b>上一个节点（不含）到自己</b> 这一段弧。<code>key7</code> 越过了 2³²-1，绕回到 A。</p>',
+          set: { own: ['A', 'B', 'C'], info: [['A 负责 (C, A]，B 负责 (A, B]，C 负责 (B, C]', '']] }, look: [0, 3, 6] },
+        { title: '新增节点 D',
+          desc: '<p>扩容：新节点 D 的哈希落在 C 和 A 之间。</p><p class="warn">只有 <b>(C, D]</b> 这一段（橙色）的归属会改变，原来属于 A。</p>',
+          set: { nodes: ['A', 'B', 'C', 'D'], info: [['受影响的范围：(C, D]', 'c-warn']] }, pop: ['D'], hl: [260, 340, 'warn'] },
+        { title: '只迁移 (C, D] 段的 key',
+          desc: '<p><code>key7</code>、<code>key8</code> 从 A 迁移到 D，<b>其他 key 都不动</b>：8 个 key 只迁移 2 个。</p><p>B、C 完全不受影响。</p>',
+          set: { own: ['A', 'B', 'C', 'D'], info: [['迁移 2 / 8 个 key，只涉及 A → D', 'c-ok']] }, hl: [260, 340, 'warn'] },
+        { title: '对比：普通取模 hash % N',
+          desc: '<p>如果用 <code>hash(key) % N</code>，节点数从 3 变成 4，同样 8 个 key 有 <b class="bad">7 个</b> 要换节点（右侧表格）。</p><p>大规模迁移会让缓存几乎全部失效，压力全打到数据库上。</p>',
+          set: { table: 'mod', info: [['取模：N = 3 → 4，迁移 7 / 8 个 key', 'c-bad']] } },
+        { title: '节点 B 宕机：数据交给下一个节点',
+          desc: '<p>B 下线，它负责的 (A, B] 段由顺时针的下一个节点 <b>C</b> 接管：<code>key2</code>、<code>key3</code> 迁移到 C。</p><p>其他 key 不受影响。</p>',
+          set: { table: 'own', nodes: ['A', 'C', 'D'], own: ['A', 'C', 'D'], info: [['只迁移 B 的 key，全部交给 C', 'c-warn']] }, hl: [30, 150, 'bad'], gone: ['B'] },
+        { title: '问题：负载全压到一个节点',
+          desc: '<p>B 的数据 <b>全部</b> 压到了 C，C 现在有 5 个 key，是 A 的 5 倍。</p><p class="bad">节点少、分布不均时，一个节点宕机可能接着压垮下一个节点。解决办法见场景 2：虚拟节点。</p>',
+          set: { info: [['C 承担 5 / 8 的 key：数据倾斜', 'c-bad']] }, hotBar: 'C', dwell: 3600 },
+      ],
+    },
+    {
+      label: '数据倾斜与虚拟节点',
+      mode: 'ring', nodes: NODES2, keys: KEYS2,
+      code: ['// 每个物理节点映射成多个虚拟节点', 'for (node : nodes)', ' for (i = 1; i <= 150; i++)', '  ring.put(hash(node+"#"+i), node)', '', '// 查找: 先找虚拟节点, 再映射回物理节点', 'vnode = ring.ceiling(hash(key))', 'return ring.get(vnode) // 物理节点'],
+      state: { nodes: ['A', 'B', 'C'], own: ['A', 'B', 'C'], keys: true, table: 'bars', info: [] },
+      steps: [
+        { title: '节点少：位置挤在一起，数据倾斜',
+          desc: '<p>只有 3 个节点，哈希后恰好都挤在环的右上角。</p><p class="bad">A 负责的弧覆盖了大半个环：12 个 key 里 A 有 9 个，B 只有 1 个。</p>',
+          set: { info: [['A 负责 (C, A]，约 290°，占了大半个环', 'c-bad']] }, hl: [80, 370, 'bad'], hotBar: 'A' },
+        { title: '引入虚拟节点', line: [2, 3, 4],
+          desc: '<p>每个物理节点映射成多个 <b>虚拟节点</b>：对 <code>A#1</code>、<code>A#2</code>、<code>A#3</code> 分别求哈希放到环上。</p><p>虚拟节点越多，在环上越分散。这里每个节点 3 个，实际一般用上百个（如 150 个）。</p>',
+          set: { nodes: VN, info: [['A → A#1、A#2、A#3（B、C 同理）', '']] }, pop: VN },
+        { title: 'key 按虚拟节点重新归属',
+          desc: '<p>key 顺时针找到的是虚拟节点，再映射回物理节点。</p><p class="ok">现在 A、B、C 各 4 个 key，分布均匀。</p>',
+          set: { own: VN, info: [['A : B : C = 4 : 4 : 4', 'c-ok']] } },
+        { title: '查找：key → 虚拟节点 → 物理节点', line: [7, 8],
+          desc: '<p><code>k5</code> 顺时针遇到 <code>B#2</code>，属于物理节点 B；<code>k11</code> 越过 0 点遇到 <code>A#1</code>，属于 A。</p>',
+          set: { info: [['k5 → B#2 → B      k11 → A#1 → A', '']] }, look: [4, 10] },
+        { title: '节点 B 宕机：数据分散给多个节点',
+          desc: '<p>B 的 3 个虚拟节点一起下线。它们在环上的位置分散，所以 B 的 key 分别交给 <b>不同</b> 的下一个虚拟节点：3 个给 A，1 个给 C。</p><p class="ok">压力被多个节点分担，不会全部压到一个节点上。</p>',
+          set: { nodes: VN_NOB, own: VN_NOB, info: [['B 的 4 个 key：3 个 → A，1 个 → C', 'c-ok']] }, gone: ['B#1', 'B#2', 'B#3'] },
+        { title: '小结：虚拟节点越多越均匀',
+          desc: '<p>真实场景每个物理节点配上百个虚拟节点（如 150 个），各节点负载接近平均，增减节点时迁移的数据也分散在所有节点之间。</p><p>Twemproxy 的 ketama、Jedis 的 ShardedJedis 都是这样实现的。</p>',
+          set: { info: [['每个物理节点 ~150 个虚拟节点 → 负载接近平均', 'c-ok']] }, dwell: 3600 },
+      ],
+    },
+    {
+      label: 'Redis Cluster：16384 个哈希槽',
+      mode: 'slot',
+      code: ['slot = CRC16(key) % 16384', '', 'redis-cli --cluster reshard ...', 'CLUSTER KEYSLOT user:1001', '', 'MSET user:1:name a user:1:age 1', 'MSET {user:1}:name a {user:1}:age 1'],
+      state: { segs: ['m1', 'm2', 'm3'], ms: ['M1', 'M2', 'M3'], slots: SLOTS0, pipe: null, pins: [], info: [] },
+      steps: [
+        { title: 'Redis Cluster 不用一致性哈希',
+          desc: '<p>Redis Cluster 把整个 key 空间分成 <b>16384 个哈希槽</b>，每个主节点负责一部分槽。</p><p>这里 3 个主节点，按 <code>redis-cli --cluster create</code> 的默认方式平均分配。</p>',
+          set: { info: [['16384 个槽，每个主节点负责一段（可以不连续）', '']] } },
+        { title: 'key → CRC16 → 取模 → 槽', line: [1, 4],
+          desc: '<p><code>CRC16("user:1001") = 22096</code>，<code>22096 % 16384 = 5712</code>。</p><p>槽 5712 在 M2 负责的 5461 ~ 10922 里，所以这个 key 存在 M2。</p>',
+          set: { pipe: ['user:1001', '22096', '5712', 'M2', 'B'], pins: [[5712, '5712', 'B']], info: [['user:1001 → 槽 5712 → M2', 'c-violet']] }, toM: [[5712, 'M2', 'B']] },
+        { title: '另一个 key 落在 M1', line: 1,
+          desc: '<p><code>CRC16("order:88") = 17876</code> → 槽 <b>1492</b> → M1。</p><p>客户端缓存了“槽 → 节点”的映射表，直接把命令发到正确的节点；发错节点会收到 <code>MOVED</code> 重定向。</p>',
+          set: { pipe: ['order:88', '17876', '1492', 'M1', 'A'], pins: [[1492, '1492', 'A']], info: [['order:88 → 槽 1492 → M1', 'c-accent']] }, toM: [[1492, 'M1', 'A']] },
+        { title: '扩容：加入新主节点 M4',
+          desc: '<p>新节点 M4 加入集群时 <b>一个槽都没有</b>，不承担任何数据。</p><p>扩容需要我们决定把哪些槽迁给它，这一点可以手动控制。</p>',
+          set: { ms: ['M1', 'M2', 'M3', 'M4'], pins: [], pipe: null, info: [['M4 已加入，0 个槽', 'c-warn']] } },
+        { title: '迁移槽（resharding）', line: 3,
+          desc: '<p>从 M1、M2、M3 各迁出 1365 个槽给 M4，每个节点约 4096 个槽。</p><p>迁移按槽进行：源节点标记 <code>MIGRATING</code>，目标节点标记 <code>IMPORTING</code>，用 <code>MIGRATE</code> 逐个搬 key；期间访问正在迁移的 key 会收到 <code>ASK</code> 重定向。</p>',
+          set: { segs: ['m1', 'm2', 'm3', 'n1', 'n2', 'n3'], slots: SLOTS1, info: [['M1、M2、M3 各迁出 1365 个槽给 M4', 'c-warn']] }, mig: true },
+        { title: '旧映射失效：MOVED 重定向',
+          desc: '<p>槽 5712 现在归 M4。客户端还按旧映射把 <code>GET user:1001</code> 发给 M2，M2 回复 <code>MOVED 5712 M4</code>。</p><p>客户端刷新映射表，以后直接访问 M4。</p>',
+          set: { pipe: ['user:1001', '22096', '5712', 'M4', 'D'], pins: [[5712, '5712', 'D']], info: [['MOVED 5712 → M4，客户端更新槽映射', 'c-warn']] }, toM: [[5712, 'M2', 'B']], moved: true },
+        { title: '多 key 命令：不同槽会报错', line: 6, badLine: 6,
+          desc: '<p><code>user:1:name</code> → 槽 12440，<code>user:1:age</code> → 槽 13180。即使它们恰好在同一个节点，<b>槽不同</b> 也不行。</p><p class="bad">MSET、事务、Lua 脚本操作多个 key 时要求它们在同一个槽，否则返回 <code>CROSSSLOT</code> 错误。</p>',
+          set: { pipe: ['user:1:name, user:1:age', '28824, 62332', '12440, 13180', 'CROSSSLOT', 'bad'], pins: [[12440, '12440', 'bad'], [13180, '13180', 'bad']], info: [['不同槽 → CROSSSLOT 错误', 'c-bad']] } },
+        { title: 'hash tag：只对 {} 里的部分求哈希', line: 7,
+          desc: '<p>key 里有 <code>{...}</code> 时，只对花括号里的内容求 CRC16。</p><p><code>{user:1}:name</code> 和 <code>{user:1}:age</code> 都按 <code>user:1</code> 计算，<code>CRC16("user:1") = 27162</code> → 都在槽 <b>10778</b>，MSET 成功。</p><p class="warn">别把太多 key 放进同一个 tag，否则会形成热点槽。</p>',
+          set: { pipe: ['{user:1}:name, {user:1}:age', '27162', '10778', 'M2', 'B'], pins: [[10778, '10778', 'ok']], info: [['同一个 hash tag → 同一个槽 → 多 key 命令可用', 'c-ok']] }, toM: [[10778, 'M2', 'B']] },
+        { title: '为什么是 16384 个槽',
+          desc: '<p>节点之间的心跳包要用 bitmap 携带“我负责哪些槽”：16384 位 = <b>2KB</b>，大小合适；65536 位就要 8KB，太大。</p><p>官方建议集群不超过 1000 个主节点，16384 个槽足够分。</p>',
+          set: { pipe: null, pins: [], info: [['16384 bit = 2KB 心跳 bitmap；建议 ≤ 1000 个节点', '']] }, dwell: 3600 },
+      ],
+    },
+  ];
+
+  let E, SC;
+  // 当前可见节点中，顺时针第一个 (角度 >= a)，没有就绕回最小的
+  function ownerOf(ids, a) {
+    let best = null, first = null;
+    for (const id of ids) {
+      const n = SC.nodes[id];
+      if (!first || n.a < SC.nodes[first].a) first = id;
+      if (n.a >= a && (!best || n.a < SC.nodes[best].a)) best = id;
+    }
+    return best || first;
+  }
+  function arcPath(a1, a2, r) {
+    if (a2 - a1 >= 359.9) return `M${CX},${CY - r} A${r},${r} 0 1 1 ${CX},${CY + r} A${r},${r} 0 1 1 ${CX},${CY - r}`;
+    const p1 = pt(a1, r), p2 = pt(a2, r);
+    return `M${p1.x},${p1.y} A${r},${r} 0 ${a2 - a1 > 180 ? 1 : 0} 1 ${p2.x},${p2.y}`;
+  }
+  // 沿环顺时针转动的指针
+  function spinner(fx, from, to, cls, ms) {
+    const g = svg('g', {}, fx);
+    svg('circle', { cx: CX, cy: CY - R, r: 7, class: 'dot ' + (cls || '') }, g);
+    g.style.transformOrigin = `${CX}px ${CY}px`;
+    g.style.transform = `rotate(${from}deg)`;
+    g.style.transition = `transform ${ms || 1300}ms cubic-bezier(.4, 0, .2, 1), opacity .4s`;
+    g.getBoundingClientRect();
+    requestAnimationFrame(() => requestAnimationFrame(() => { g.style.transform = `rotate(${to}deg)`; }));
+    setTimeout(() => { g.style.opacity = 0; }, (ms || 1300) + 500);
+    return g;
+  }
+  function fly(fx, a, b, label, cls) {
+    const g = packet(fx, a, b, label, cls);
+    const t = g.querySelector('text');
+    if (t && b.x > a.x) { t.setAttribute('x', -11); t.setAttribute('text-anchor', 'end'); }
+  }
+
+  const LEGEND = {
+    ring: '<span><i class="sw" style="background:var(--accent)"></i>A</span><span><i class="sw" style="background:var(--violet)"></i>B</span><span><i class="sw" style="background:var(--ok)"></i>C</span><span><i class="sw" style="background:var(--warn)"></i>D / 受影响的范围</span><span><i class="sw" style="background:var(--bad)"></i>问题</span>',
+    slot: '<span><i class="sw" style="background:var(--accent)"></i>M1</span><span><i class="sw" style="background:var(--violet)"></i>M2</span><span><i class="sw" style="background:var(--ok)"></i>M3</span><span><i class="sw" style="background:var(--warn)"></i>M4（新节点）</span><span><i class="sw" style="background:var(--bad)"></i>错误</span>',
+  };
+
+  function initRing(g) {
+    svg('circle', { cx: CX, cy: CY, r: R, class: 'ring' }, g);
+    E.arcs = svg('g', {}, g);
+    E.hl = svg('path', { d: '', class: 'arc-hl' }, g);
+    [[0, '0'], [90, '2³⁰'], [180, '2³¹'], [270, '3·2³⁰']].forEach(([a, t]) => {
+      const p1 = pt(a, R - 8), p2 = pt(a, R + 8), q = pt(a, R - 80);
+      svg('line', { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, class: 'wire' }, g);
+      svg('text', { x: q.x, y: q.y + 4, 'text-anchor': 'middle', class: 'mono small muted' }, g, t);
+    });
+    const q = pt(-8, R - 80);
+    svg('text', { x: q.x - 4, y: q.y + 4, 'text-anchor': 'end', class: 'mono small muted' }, g, '2³²-1');
+    svg('text', { x: CX, y: CY - 4, 'text-anchor': 'middle', class: 'title' }, g, '哈希环');
+    svg('text', { x: CX, y: CY + 16, 'text-anchor': 'middle', class: 'small muted' }, g, '顺时针查找');
+    // key
+    E.keys = SC.keys.map(k => {
+      const kg = svg('g', { class: 'anim hide' }, g);
+      const p = pt(k.a, R - 24);
+      const dot = svg('circle', { cx: p.x, cy: p.y, r: 6, class: 'fN anim' }, kg);
+      let lab = null;
+      if (SC.keys.length <= 8) {
+        const lp = pt(k.a, R - 44);
+        lab = svg('text', { x: lp.x, y: lp.y + 4, 'text-anchor': 'middle', class: 'mono small muted' }, kg, k.name.replace('key', 'k'));
+      }
+      return { kg, dot, lab };
+    });
+    // 节点
+    E.nodes = {};
+    for (const id in SC.nodes) {
+      const n = SC.nodes[id];
+      const ng = svg('g', { class: 'anim hide' }, g);
+      const p = pt(n.a, R);
+      svg('circle', { cx: p.x, cy: p.y, r: n.v ? 9 : 15, class: 'f' + n.p, style: 'stroke: var(--surface); stroke-width: 2' }, ng);
+      if (n.v) {
+        const lp = pt(n.a, R + 26);
+        svg('text', { x: lp.x, y: lp.y + 4, 'text-anchor': 'middle', class: 'mono small t' + n.p }, ng, id);
+      } else {
+        svg('text', { x: p.x, y: p.y + 4.5, 'text-anchor': 'middle', class: 'on-dot' }, ng, id);
+      }
+      E.nodes[id] = ng;
+    }
+    // 右侧面板
+    const PX = 452;
+    svg('rect', { x: PX - 8, y: 14, width: 308, height: 380, rx: 10, class: 'box soft' }, g);
+    E.rows = [];
+    if (SC.keys.length <= 8) {
+      E.thead = [svg('text', { x: PX + 6, y: 40, class: 'small muted' }, g, 'key'), svg('text', { x: PX + 54, y: 40, class: 'small muted' }, g, 'hash（示意）'), svg('text', { x: PX + 176, y: 40, class: 'small muted' }, g, '节点')];
+      SC.keys.forEach((k, j) => {
+        const y = 52 + j * 26;
+        const hl = svg('rect', { x: PX, y, width: 292, height: 22, rx: 4, class: 'rowhl anim hide' }, g);
+        svg('text', { x: PX + 6, y: y + 15, class: 'mono small' }, g, k.name);
+        svg('text', { x: PX + 54, y: y + 15, class: 'mono small muted' }, g, String(HASH(k.a)));
+        const o = svg('text', { x: PX + 176, y: y + 15, class: 'mono small' }, g, '');
+        E.rows.push({ hl, o });
+      });
+    }
+    const by = SC.keys.length <= 8 ? 274 : 40;
+    svg('text', { x: PX + 6, y: by, class: 'small muted' }, g, '每个物理节点的 key 数');
+    E.bars = {};
+    ['A', 'B', 'C', 'D'].forEach((p, j) => {
+      const y = by + 14 + j * 26;
+      const t = svg('text', { x: PX + 6, y: y + 12, class: 'title t' + p }, g, p);
+      const b = svg('rect', { x: PX + 28, y: y + 1, width: 0, height: 14, rx: 3, class: 'f' + p + ' anim' }, g);
+      const c = svg('text', { x: PX + 34, y: y + 12, class: 'mono small' }, g, '');
+      E.bars[p] = { t, b, c };
+    });
+    if (SC.keys.length > 8) {
+      E.vmap = [0, 1, 2].map(j => svg('text', { x: PX + 6, y: 190 + j * 24, class: 'mono small' }, g, ''));
+    }
+    E.info = [0, 1].map(k => svg('text', { x: 16, y: 430 + k * 24, class: 'small' }, g, ''));
+    E.prev = null;
+  }
+
+  function renderRing(st, step, i, ctx) {
+    const show = new Set(st.nodes);
+    for (const id in E.nodes) E.nodes[id].classList.toggle('hide', !show.has(id));
+    for (const id of step.pop || []) E.nodes[id].firstChild.classList.add('pulse');
+    for (const id in E.nodes) if (!(step.pop || []).includes(id)) E.nodes[id].firstChild.classList.remove('pulse');
+    // 归属
+    const own = st.own ? SC.keys.map(k => ownerOf(st.own, k.a)) : null;
+    const phys = own ? own.map(id => SC.nodes[id].p) : null;
+    E.keys.forEach((k, j) => {
+      k.kg.classList.toggle('hide', !st.keys);
+      k.dot.setAttribute('class', 'anim ' + (phys ? 'f' + phys[j] : 'fN'));
+    });
+    // 弧
+    while (E.arcs.firstChild) E.arcs.removeChild(E.arcs.firstChild);
+    if (st.own) {
+      const ids = [...st.own].sort((a, b) => SC.nodes[a].a - SC.nodes[b].a);
+      ids.forEach((id, j) => {
+        const pre = ids[(j - 1 + ids.length) % ids.length];
+        let a1 = SC.nodes[pre].a, a2 = SC.nodes[id].a;
+        if (a2 <= a1) a2 += 360;
+        svg('path', { d: arcPath(a1, a2, R), class: 'arc s' + SC.nodes[id].p }, E.arcs);
+      });
+    }
+    if (step.hl) { E.hl.setAttribute('d', arcPath(step.hl[0], step.hl[1], R)); E.hl.setAttribute('class', 'arc-hl pulse ' + step.hl[2]); }
+    else E.hl.setAttribute('d', '');
+    // 表格
+    const moved = [];
+    if (E.rows.length) {
+      E.rows.forEach((r, j) => {
+        let txt = phys ? phys[j] : '', cls = phys ? 't' + phys[j] : '', hl = false;
+        if (st.table === 'mod') {
+          const h = HASH(SC.keys[j].a), m3 = 'ABC'[h % 3], m4 = 'ABCD'[h % 4];
+          txt = `%3=${m3} → %4=${m4}`; hl = m3 !== m4; cls = hl ? 'c-bad' : 'c-ok';
+        }
+        r.o.textContent = txt;
+        r.o.setAttribute('class', 'mono small ' + cls);
+        r.hl.classList.toggle('hide', !hl);
+      });
+      E.thead[2].textContent = st.table === 'mod' ? '取模：N = 3 → 4' : '节点';
+    }
+    // 计数条
+    const cnt = { A: 0, B: 0, C: 0, D: 0 };
+    if (phys) phys.forEach(p => cnt[p]++);
+    for (const p in E.bars) {
+      const { t, b, c } = E.bars[p];
+      const visible = SC.nodes[p] || p !== 'D';
+      const has = Object.values(SC.nodes).some(n => n.p === p);
+      [t, b, c].forEach(el => el.style.display = has ? '' : 'none');
+      b.setAttribute('width', cnt[p] * 18);
+      c.setAttribute('x', 452 + 34 + cnt[p] * 18);
+      c.textContent = phys ? String(cnt[p]) : '-';
+      b.setAttribute('class', 'f' + p + ' anim' + (step.hotBar === p ? ' pulse' : ''));
+    }
+    if (E.vmap) {
+      const vs = st.nodes.filter(id => SC.nodes[id].v);
+      ['A', 'B', 'C'].forEach((p, j) => {
+        const list = vs.filter(v => v[0] === p);
+        E.vmap[j].textContent = list.length ? `${p} → ${list.join('、')}` : (vs.length ? `${p} → 已下线` : '');
+        E.vmap[j].setAttribute('class', 'mono small ' + (list.length ? 't' + p : 'c-bad'));
+      });
+    }
+    (st.info || []).forEach(([t, c], k) => { E.info[k].textContent = t; E.info[k].setAttribute('class', 'small ' + (c || '')); });
+    for (let k = (st.info || []).length; k < 2; k++) E.info[k].textContent = '';
+    // 动画: 下线节点的残影, 转圈指针, 迁移的 key
+    for (const id of step.gone || []) {
+      const n = SC.nodes[id], p = pt(n.a, R);
+      const c = svg('circle', { cx: p.x, cy: p.y, r: n.v ? 11 : 17, class: 'wire bad', style: 'stroke-width: 3' }, ctx.fx);
+      svg('path', { d: `M${p.x - 7},${p.y - 7} l14,14 M${p.x + 7},${p.y - 7} l-14,14`, class: 'wire bad', style: 'stroke-width: 3' }, ctx.fx);
+    }
+    if (step.spin) spinner(ctx.fx, 0, 360, 'accent', 2200);
+    for (const j of step.look || []) {
+      const k = SC.keys[j], n = SC.nodes[own[j]];
+      let to = n.a; if (to < k.a) to += 360;
+      spinner(ctx.fx, k.a, to, phys[j] === 'A' ? '' : phys[j] === 'B' ? 'violet' : phys[j] === 'C' ? 'ok' : 'warn');
+      const lp = pt(k.a, R - 24);
+      svg('circle', { cx: lp.x, cy: lp.y, r: 10, class: 'wire accent pulse', style: 'stroke-width: 2' }, ctx.fx);
+    }
+    if (E.prev && E.prevI === i - 1 && own) {
+      own.forEach((id, j) => {
+        const old = E.prev[j];
+        if (old && old !== id && SC.nodes[old].p !== SC.nodes[id].p) {
+          fly(ctx.fx, pt(SC.nodes[old].a, R), pt(SC.nodes[id].a, R), SC.keys[j].name, 'warn');
+          const lp = pt(SC.keys[j].a, R - 24);
+          svg('circle', { cx: lp.x, cy: lp.y, r: 10, class: 'wire warn pulse', style: 'stroke-width: 2' }, ctx.fx);
+        }
+      });
+    }
+    E.prev = own; E.prevI = i;
+  }
+
+  // ---------- 哈希槽 ----------
+  function initSlot(g) {
+    // 计算管道
+    const PIPE = [['key', 16, 214], ['CRC16(key)', 262, 140], ['% 16384 = 槽', 434, 140], ['节点', 606, 138]];
+    E.pipe = PIPE.map(([lab, x, w], k) => {
+      const r = svg('rect', { x, y: 30, width: w, height: 52, rx: 8, class: 'box anim' }, g);
+      svg('text', { x: x + 10, y: 48, class: 'small muted' }, g, lab);
+      const v = svg('text', { x: x + 10, y: 70, class: 'mono' }, g, '');
+      if (k < 3) Player.arrow(g, x + w + 4, 56, PIPE[k + 1][1] - 4, 56, '');
+      return { r, v };
+    });
+    // 槽条
+    svg('text', { x: BX, y: BY - 34, class: 'small muted' }, g, '16384 个哈希槽');
+    E.segs = {};
+    for (const s of SEGS) {
+      E.segs[s.id] = svg('rect', { x: sx(s.from), y: BY, width: sx(s.to + 1) - sx(s.from), height: 34, class: 'seg anim f' + s.m }, g);
+    }
+    [0, 5461, 10923, 16383].forEach(s => {
+      svg('line', { x1: sx(s), y1: BY + 34, x2: sx(s), y2: BY + 40, class: 'wire' }, g);
+      svg('text', { x: sx(s), y: BY + 52, 'text-anchor': s === 16383 ? 'end' : s ? 'middle' : 'start', class: 'mono small muted' }, g, String(s));
+    });
+    E.pins = [0, 1].map(() => {
+      const pg = svg('g', { class: 'anim hide' }, g);
+      svg('path', { d: 'M0,0 l-6,-10 h12 z', class: 'pin' }, pg);
+      const t = svg('text', { x: 0, y: -14, 'text-anchor': 'middle', class: 'mono small' }, pg, '');
+      move(pg, sx(8192), BY - 2);
+      return { pg, t };
+    });
+    // 主节点
+    E.ms = {};
+    for (const m of MS) {
+      const mg = svg('g', { class: 'anim hide' }, g);
+      const r = svg('rect', { x: m.x, y: 236, width: 160, height: 120, rx: 8, class: 'box anim' }, mg);
+      svg('circle', { cx: m.x + 18, cy: 256, r: 7, class: 'f' + m.c }, mg);
+      svg('text', { x: m.x + 32, y: 261, class: 'title' }, mg, m.id + ' 主节点');
+      svg('text', { x: m.x + 12, y: 282, class: 'small muted' }, mg, '负责的槽');
+      const lines = [0, 1, 2].map(k => svg('text', { x: m.x + 12, y: 302 + k * 18, class: 'mono small' }, mg, ''));
+      E.ms[m.id] = { mg, r, lines, m };
+    }
+    E.info = [0, 1].map(k => svg('text', { x: 16, y: 400 + k * 26, class: 'small' }, g, ''));
+  }
+  const mCenter = id => { const m = MS.find(q => q.id === id); return { x: m.x + 80, y: 236 }; };
+  const CLS = { A: 'accent', B: 'violet', C: 'ok', D: 'warn' };
+
+  function renderSlot(st, step, i, ctx) {
+    for (const s of SEGS) E.segs[s.id].classList.toggle('hide', !st.segs.includes(s.id));
+    for (const id in E.ms) {
+      const o = E.ms[id];
+      o.mg.classList.toggle('hide', !st.ms.includes(id));
+      const sl = st.slots[id] || [];
+      o.lines.forEach((t, k) => { t.textContent = k === 0 && !sl.length ? '（无）' : sl[k] || ''; t.setAttribute('class', 'mono small' + (!sl.length ? ' c-warn' : '')); });
+      const tgt = st.pipe && st.pipe[3] === id;
+      o.r.setAttribute('class', 'box anim' + (tgt ? ' ' + CLS[st.pipe[4]] : (id === 'M4' && !sl.length ? ' warn dashed' : '')));
+    }
+    const vals = st.pipe || ['', '', '', '', ''];
+    E.pipe.forEach((p, k) => {
+      p.v.textContent = vals[k] || (st.pipe ? '' : '—');
+      p.r.setAttribute('class', 'box anim' + (st.pipe && k === 3 ? ' ' + (CLS[vals[4]] || vals[4]) : st.pipe ? ' soft' : ''));
+    });
+    E.pins.forEach((p, k) => {
+      const pin = st.pins[k];
+      p.pg.classList.toggle('hide', !pin);
+      if (pin) {
+        move(p.pg, sx(pin[0]), BY - 2);
+        p.t.textContent = pin[1];
+        p.t.setAttribute('class', 'mono small c-' + (CLS[pin[2]] || pin[2]));
+      }
+    });
+    if (st.pins.length === 2) { E.pins[0].t.setAttribute('text-anchor', 'end'); E.pins[1].t.setAttribute('text-anchor', 'start'); }
+    else E.pins.forEach(p => p.t.setAttribute('text-anchor', 'middle'));
+    (st.info || []).forEach(([t, c], k) => { E.info[k].textContent = t; E.info[k].setAttribute('class', 'small ' + (c || '')); });
+    for (let k = (st.info || []).length; k < 2; k++) E.info[k].textContent = '';
+    for (const [s, m, c] of step.toM || []) fly(ctx.fx, { x: sx(s), y: BY + 36 }, mCenter(m), '', CLS[c]);
+    const tok = E.tok;
+    if (step.moved) {
+      setTimeout(() => { if (E.tok === tok) fly(ctx.fx, { x: 300, y: 226 }, { x: 640, y: 226 }, 'MOVED 5712 M4', 'warn'); }, 800);
+    }
+    if (step.mig) {
+      [['M1', 'n1'], ['M2', 'n2'], ['M3', 'n3']].forEach(([m, seg]) => fly(ctx.fx, mCenter(m), { x: 656, y: 236 }, '', 'warn'));
+      for (const id of ['n1', 'n2', 'n3']) E.segs[id].classList.add('pulse');
+    } else for (const id of ['n1', 'n2', 'n3']) E.segs[id].classList.remove('pulse');
+  }
+
+  Player({
+    scenarios,
+    dwell: 3000,
+    init(g, ctx) {
+      SC = scenarios[ctx.scenario];
+      E = { tok: 0 };
+      document.getElementById('legend').innerHTML = LEGEND[SC.mode];
+      document.getElementById('stageTitle').textContent = SC.mode === 'ring' ? '哈希环（0 ~ 2³²-1）' : 'Redis Cluster 哈希槽';
+      document.getElementById('cap').textContent = SC.mode === 'ring'
+        ? '环上的角度代表哈希值，示意图中的哈希值是为演示挑选的，不是真实 IP 的哈希结果。'
+        : 'CRC16 采用 Redis 使用的 XMODEM 版本，图中的 CRC16 值和槽号都是真实计算结果，可以用 CLUSTER KEYSLOT 验证。';
+      if (SC.mode === 'ring') initRing(g); else initSlot(g);
+    },
+    render(st, step, i, ctx) {
+      E.tok++;
+      if (SC.mode === 'ring') renderRing(st, step, i, ctx); else renderSlot(st, step, i, ctx);
+    },
+  });
+})();
+</script>
+</body>
+</html>

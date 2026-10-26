@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kafka 单播多播</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .stage .wire.violet { stroke: var(--violet); }
+  .stage .wire.thick { stroke-width: 2; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Kafka · 2 · Consumer Group</p>
+    <h1>单播与多播：消费者组决定一条消息被谁处理</h1>
+    <p class="lede">Kafka 没有单播、多播这样的协议，而是用消费者组实现两种模型：同一个组内，一个分区同一时刻只分给一个消费者，所以一条消息在组内只处理一次（队列模型）；多个组订阅同一个 Topic，每个组都收到全量消息（发布-订阅模型）。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>Topic、消费者组与位移</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--accent)"></i>消费组 G1</span>
+            <span><i class="sw" style="background:var(--violet)"></i>消费组 G2</span>
+            <span><i class="sw" style="background:var(--ok)"></i>已处理 / 已提交</span>
+            <span><i class="sw" style="background:var(--warn)"></i>空闲 / 处理中</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 490" role="img" aria-label="生产者把消息写入 3 个分区，消费者组内的消费者按分区分配拉取消息，并把位移提交到 __consumer_offsets"></svg>
+        <p class="cap">连线表示分区分配给了哪个消费者。消息被消费后不会从分区删除，只按保留策略过期。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>代码</h2></div>
+        <pre class="code" id="code"></pre>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>模型</th><th>怎么配置</th><th>效果</th></tr></thead>
+        <tbody>
+          <tr><td>单播（点对点 / 队列）</td><td>所有消费者使用<b>同一个</b> <code>group.id</code></td><td>一个分区同一时刻只被组内一个消费者消费，一条消息只被组内一个消费者处理</td></tr>
+          <tr><td>多播（发布-订阅）</td><td>多个消费组订阅同一个 Topic</td><td>每个组都收到全量消息，组内再由一个消费者处理</td></tr>
+          <tr><td>广播</td><td>每个消费者使用<b>不同的</b> <code>group.id</code></td><td>每个消费者都收到全部消息</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul style="margin-top:10px">
+      <li>组内消费者数 &gt; 分区数时，多出来的消费者空闲。<b>分区数决定了一个组的最大消费并行度。</b></li>
+      <li>每个消费组在 <code>__consumer_offsets</code> 中独立保存自己的位移（键是 group + topic + 分区），互不影响。</li>
+      <li>相同 key 的消息进入同一分区，分区内有序；所以"一个分区只给组内一个消费者"也保证了组内的顺序消费。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet } = Player;
+  const rowY = p => 92 + p * 84;
+  const cellX = k => 196 + k * 44;
+  const GX = 494, CXB = 506, CW = 226;
+
+  const scenarios = [
+    {
+      label: '单播：一个组 3 个消费者',
+      code: [
+        '// 三个消费者使用同一个 group.id',
+        'props.put("group.id", "G1");',
+        'subscribe(List.of("order"));',
+        'while (true) {',
+        '    rs = consumer.poll(timeout);',
+        '    process(rs);',
+        '    consumer.commitSync();',
+        '}',
+      ],
+      groups: [{ id: 'G1', cls: 'accent', consumers: ['C1', 'C2', 'C3'] }],
+      state: { parts: [[], [], []], assign: { 'G1:C1': ['P0'], 'G1:C2': ['P1'], 'G1:C3': ['P2'] }, done: {}, st: {}, off: { G1: [0, 0, 0] }, result: '' },
+      steps: [
+        { title: '初始：3 个分区分给 3 个消费者', line: [2, 3],
+          desc: '<p>Topic <code>order</code> 有 3 个分区，消费组 G1 有 3 个消费者。</p><p>分区分配：P0 → C1，P1 → C2，P2 → C3。<b>一个分区同一时刻只属于组内一个消费者。</b></p>' },
+        { title: '生产者发送 m0、m1、m2',
+          desc: '<p>生产者按 key 的哈希选择分区：m0 → P0，m1 → P1，m2 → P2。</p><p>每个分区就是一个只追加的日志。</p>',
+          set: { parts: [['m0'], ['m1'], ['m2']] }, hot: { 'P0:0': 'warn', 'P1:0': 'warn', 'P2:0': 'warn' },
+          moves: [['prod', 'P0:0', 'm0', 'warn'], ['prod', 'P1:0', 'm1', 'warn', 250], ['prod', 'P2:0', 'm2', 'warn', 500]] },
+        { title: '组内每条消息只被处理一次', line: [5, 6],
+          desc: '<p>每个消费者只拉取分配给自己的分区：C1 拿到 m0，C2 拿到 m1，C3 拿到 m2。</p><p class="ok">每条消息在组内只被<b>一个</b>消费者处理，这就是单播（队列模型）。</p>',
+          set: { done: { 'G1:C1': ['m0'], 'G1:C2': ['m1'], 'G1:C3': ['m2'] } }, hot: { 'G1:C1': 'ok', 'G1:C2': 'ok', 'G1:C3': 'ok' },
+          moves: [['P0:0', 'G1:C1', 'm0', 'accent'], ['P1:0', 'G1:C2', 'm1', 'accent'], ['P2:0', 'G1:C3', 'm2', 'accent']] },
+        { title: '提交位移到 __consumer_offsets', line: 7,
+          desc: '<p>处理完后提交位移：G1 在 P0、P1、P2 上的下一条要消费的位置都是 1。</p><p>位移按 <code>group + topic + 分区</code> 保存，消费者重启或分区换人后从这里继续。</p>',
+          set: { off: { G1: [1, 1, 1] } }, hot: { off: 'ok' },
+          moves: [['G1:C1', 'off:G1:0', 'P0=1', 'ok'], ['G1:C2', 'off:G1:1', 'P1=1', 'ok'], ['G1:C3', 'off:G1:2', 'P2=1', 'ok']] },
+        { title: '再发送 m3、m4、m5',
+          desc: '<p>m3 和 m0 的 key 相同，同样进入 P0；m4 → P1，m5 → P2。</p><p>同一个 key 总在同一分区，分区内有序。</p>',
+          set: { parts: [['m0', 'm3'], ['m1', 'm4'], ['m2', 'm5']] }, hot: { 'P0:1': 'warn', 'P1:1': 'warn', 'P2:1': 'warn' },
+          moves: [['prod', 'P0:1', 'm3', 'warn'], ['prod', 'P1:1', 'm4', 'warn', 250], ['prod', 'P2:1', 'm5', 'warn', 500]] },
+        { title: '各自继续消费自己的分区', line: [5, 6],
+          desc: '<p>C1 只会收到 P0 的 m3，C2 收到 m4，C3 收到 m5，不会有两个组内消费者处理同一条消息。</p>',
+          set: { done: { 'G1:C1': ['m0', 'm3'], 'G1:C2': ['m1', 'm4'], 'G1:C3': ['m2', 'm5'] } }, hot: { 'G1:C1': 'ok', 'G1:C2': 'ok', 'G1:C3': 'ok' },
+          moves: [['P0:1', 'G1:C1', 'm3', 'accent'], ['P1:1', 'G1:C2', 'm4', 'accent'], ['P2:1', 'G1:C3', 'm5', 'accent']] },
+        { title: '结果：组就是一个"逻辑消费者"', line: 7,
+          desc: '<p>提交位移后 G1 = {P0: 2, P1: 2, P2: 2}。</p><p>从外部看，整个组像一个消费者，6 条消息各处理一次，3 个消费者分摊负载。</p>',
+          set: { off: { G1: [2, 2, 2] }, result: '同一个组内：每条消息只被一个消费者处理（单播 / 队列）', resultCls: 'c-ok' }, hot: { off: 'ok' },
+          moves: [['G1:C1', 'off:G1:0', 'P0=2', 'ok'], ['G1:C2', 'off:G1:1', 'P1=2', 'ok'], ['G1:C3', 'off:G1:2', 'P2=2', 'ok']], dwell: 3800 },
+      ],
+    },
+    {
+      label: '多播：两个组订阅同一个 Topic',
+      code: [
+        '// 组 G1: 订单服务, 3 个实例',
+        'props.put("group.id", "G1");',
+        '// 组 G2: 积分服务, 2 个实例',
+        'props.put("group.id", "G2");',
+        'subscribe(List.of("order"));',
+        'rs = consumer.poll(timeout);',
+        'consumer.commitSync();',
+      ],
+      groups: [{ id: 'G1', cls: 'accent', consumers: ['C1', 'C2', 'C3'] }, { id: 'G2', cls: 'violet', consumers: ['C1', 'C2'] }],
+      state: { parts: [[], [], []], assign: { 'G1:C1': ['P0'], 'G1:C2': ['P1'], 'G1:C3': ['P2'], 'G2:C1': ['P0', 'P1'], 'G2:C2': ['P2'] }, done: {}, st: {}, off: { G1: [0, 0, 0], G2: [0, 0, 0] }, result: '' },
+      steps: [
+        { title: '初始：两个组各自分配分区', line: [2, 4, 5],
+          desc: '<p>G1（订单服务，3 个实例）和 G2（积分服务，2 个实例）都订阅 <code>order</code>。</p><p>每个组<b>独立</b>分配分区：G1 一人一个；G2 的 C1 负责 P0、P1，C2 负责 P2。</p>' },
+        { title: '生产者发送 m0、m1、m2',
+          desc: '<p>消息只写一份到分区里，不会因为有两个组就写两份。</p>',
+          set: { parts: [['m0'], ['m1'], ['m2']] }, hot: { 'P0:0': 'warn', 'P1:0': 'warn', 'P2:0': 'warn' },
+          moves: [['prod', 'P0:0', 'm0', 'warn'], ['prod', 'P1:0', 'm1', 'warn', 250], ['prod', 'P2:0', 'm2', 'warn', 500]] },
+        { title: 'G1 消费全部消息', line: 6,
+          desc: '<p>G1 内部仍是单播：m0、m1、m2 各被一个 G1 消费者处理。</p>',
+          set: { done: { 'G1:C1': ['m0'], 'G1:C2': ['m1'], 'G1:C3': ['m2'] } }, hot: { 'G1:C1': 'ok', 'G1:C2': 'ok', 'G1:C3': 'ok' },
+          moves: [['P0:0', 'G1:C1', 'm0', 'accent'], ['P1:0', 'G1:C2', 'm1', 'accent'], ['P2:0', 'G1:C3', 'm2', 'accent']] },
+        { title: 'G2 也收到同样的消息', line: 6,
+          desc: '<p>G2 的 C1 拉取 P0、P1，拿到 m0、m1。<b>同一条消息被投递给了每个组</b>，这就是多播（发布-订阅）。</p><p class="warn">G2 的 C2 还在处理上一批，暂时没有拉取 P2。</p>',
+          set: { done: { 'G1:C1': ['m0'], 'G1:C2': ['m1'], 'G1:C3': ['m2'], 'G2:C1': ['m0', 'm1'] }, st: { 'G2:C2': 'busy' } }, hot: { 'G2:C1': 'ok', 'G2:C2': 'warn' },
+          moves: [['P0:0', 'G2:C1', 'm0', 'violet'], ['P1:0', 'G2:C1', 'm1', 'violet', 300]] },
+        { title: '两个组的位移各自保存', line: 7,
+          desc: '<p>G1 提交 {P0: 1, P1: 1, P2: 1}，G2 提交 {P0: 1, P1: 1, P2: 0}。</p><p>两组的位移在 <code>__consumer_offsets</code> 中是不同的记录，G2 慢不会影响 G1。</p>',
+          set: { off: { G1: [1, 1, 1], G2: [1, 1, 0] } }, hot: { off: 'ok' },
+          moves: [['G1:C1', 'off:G1:0', 'P0=1', 'ok'], ['G1:C2', 'off:G1:1', 'P1=1', 'ok'], ['G1:C3', 'off:G1:2', 'P2=1', 'ok'],
+                  ['G2:C1', 'off:G2:0', 'P0=1', 'violet', 300], ['G2:C1', 'off:G2:1', 'P1=1', 'violet', 500]] },
+        { title: '生产者发送 m3',
+          desc: '<p>m3 进入 P0。</p>',
+          set: { parts: [['m0', 'm3'], ['m1'], ['m2']] }, hot: { 'P0:1': 'warn' },
+          moves: [['prod', 'P0:1', 'm3', 'warn']] },
+        { title: '两组各自按自己的进度消费', line: 6,
+          desc: '<p>G1-C1 和 G2-C1 都收到 m3。</p><p>G2-C2 处理完上一批，从自己组的位移 P2=0 开始，拿到 m2。</p>',
+          set: { done: { 'G1:C1': ['m0', 'm3'], 'G1:C2': ['m1'], 'G1:C3': ['m2'], 'G2:C1': ['m0', 'm1', 'm3'], 'G2:C2': ['m2'] }, st: { 'G2:C2': '' } },
+          hot: { 'G1:C1': 'ok', 'G2:C1': 'ok', 'G2:C2': 'ok' },
+          moves: [['P0:1', 'G1:C1', 'm3', 'accent'], ['P0:1', 'G2:C1', 'm3', 'violet', 250], ['P2:0', 'G2:C2', 'm2', 'violet', 250]] },
+        { title: '结果：每个组都收到全量消息', line: 7,
+          desc: '<p>G1 = {P0: 2, P1: 1, P2: 1}，G2 = {P0: 2, P1: 1, P2: 1}。</p><p>4 条消息被两个组各处理一次。想让每个消费者都收到全部消息（广播），就让每个消费者用不同的 <code>group.id</code>。</p>',
+          set: { off: { G1: [2, 1, 1], G2: [2, 1, 1] }, result: '多个组订阅同一 Topic：每个组都收到全量消息（多播 / 发布订阅）', resultCls: 'c-ok' }, hot: { off: 'ok' },
+          moves: [['G1:C1', 'off:G1:0', 'P0=2', 'ok'], ['G2:C1', 'off:G2:0', 'P0=2', 'violet'], ['G2:C2', 'off:G2:2', 'P2=1', 'violet']], dwell: 3800 },
+      ],
+    },
+    {
+      label: '组内消费者多于分区',
+      code: [
+        '// 4 个消费者, 3 个分区',
+        'props.put("group.id", "G1");',
+        'subscribe(List.of("order"));',
+        'rs = consumer.poll(timeout);',
+        'consumer.commitSync();',
+        '// 想提高并行度: 先增加分区数',
+      ],
+      groups: [{ id: 'G1', cls: 'accent', consumers: ['C1', 'C2', 'C3', 'C4'] }],
+      state: { parts: [[], [], []], assign: {}, done: {}, st: { 'G1:C1': 'wait', 'G1:C2': 'wait', 'G1:C3': 'wait', 'G1:C4': 'wait' }, off: { G1: [0, 0, 0] }, result: '' },
+      steps: [
+        { title: '初始：4 个消费者加入 G1', line: [1, 2, 3],
+          desc: '<p>同一个组里启动了 4 个消费者，但 Topic 只有 3 个分区。</p>' },
+        { title: '分配：C4 分不到分区', line: 3,
+          desc: '<p>一个分区只能给组内一个消费者，3 个分区最多分给 3 个消费者。</p><p class="warn">C4 没有分区，只能空闲。</p>',
+          set: { assign: { 'G1:C1': ['P0'], 'G1:C2': ['P1'], 'G1:C3': ['P2'] }, st: { 'G1:C1': '', 'G1:C2': '', 'G1:C3': '', 'G1:C4': 'idle' } }, hot: { 'G1:C4': 'warn' } },
+        { title: '生产者发送 m0、m1、m2',
+          desc: '<p>消息照常进入 3 个分区。</p>',
+          set: { parts: [['m0'], ['m1'], ['m2']] }, hot: { 'P0:0': 'warn', 'P1:0': 'warn', 'P2:0': 'warn' },
+          moves: [['prod', 'P0:0', 'm0', 'warn'], ['prod', 'P1:0', 'm1', 'warn', 250], ['prod', 'P2:0', 'm2', 'warn', 500]] },
+        { title: '只有 3 个消费者在干活', line: 4,
+          desc: '<p>C1、C2、C3 各处理自己的分区，C4 的 <code>poll</code> 永远拿不到数据。</p><p>多加消费者并<b>不会</b>提高这个组的吞吐。</p>',
+          set: { done: { 'G1:C1': ['m0'], 'G1:C2': ['m1'], 'G1:C3': ['m2'] } }, hot: { 'G1:C1': 'ok', 'G1:C2': 'ok', 'G1:C3': 'ok', 'G1:C4': 'warn' },
+          moves: [['P0:0', 'G1:C1', 'm0', 'accent'], ['P1:0', 'G1:C2', 'm1', 'accent'], ['P2:0', 'G1:C3', 'm2', 'accent']] },
+        { title: '再来一批，C4 依旧空闲', line: [4, 5],
+          desc: '<p>m3、m4、m5 同样只由 C1~C3 处理，处理后提交位移 {P0: 2, P1: 2, P2: 2}。</p>',
+          set: { parts: [['m0', 'm3'], ['m1', 'm4'], ['m2', 'm5']], done: { 'G1:C1': ['m0', 'm3'], 'G1:C2': ['m1', 'm4'], 'G1:C3': ['m2', 'm5'] }, off: { G1: [2, 2, 2] } },
+          hot: { 'G1:C4': 'warn', off: 'ok' },
+          moves: [['prod', 'P0:1', 'm3', 'warn'], ['prod', 'P1:1', 'm4', 'warn', 200], ['prod', 'P2:1', 'm5', 'warn', 400],
+                  ['P0:1', 'G1:C1', 'm3', 'accent', 1100], ['P1:1', 'G1:C2', 'm4', 'accent', 1100], ['P2:1', 'G1:C3', 'm5', 'accent', 1100]] },
+        { title: 'C2 宕机，C4 接管 P1',
+          desc: '<p>C2 挂掉后触发再均衡，空闲的 C4 分到了 P1。</p><p>多出来的消费者平时空闲，只能起到<b>热备</b>的作用。</p>',
+          set: { assign: { 'G1:C1': ['P0'], 'G1:C3': ['P2'], 'G1:C4': ['P1'] }, st: { 'G1:C2': 'down', 'G1:C4': '' } }, hot: { 'G1:C2': 'bad', 'G1:C4': 'accent' } },
+        { title: 'C4 从已提交位移继续消费', line: [4, 5],
+          desc: '<p>m6 进入 P1。C4 从 G1 在 P1 上的已提交位移 2 开始拉取，拿到 m6，不会重复处理 m1、m4。</p>',
+          set: { parts: [['m0', 'm3'], ['m1', 'm4', 'm6'], ['m2', 'm5']], done: { 'G1:C1': ['m0', 'm3'], 'G1:C3': ['m2', 'm5'], 'G1:C4': ['m6'] }, off: { G1: [2, 3, 2] },
+                 result: '分区数 = 一个组的最大并行度；多出的消费者只能空闲或热备', resultCls: 'c-warn' },
+          hot: { 'G1:C4': 'ok', off: 'ok' },
+          moves: [['prod', 'P1:2', 'm6', 'warn'], ['P1:2', 'G1:C4', 'm6', 'accent', 900], ['G1:C4', 'off:G1:1', 'P1=3', 'ok', 1800]], dwell: 3800 },
+      ],
+    },
+  ];
+
+  let E, tok = 0, LAY;
+  const later = (ms, fn) => { const t = tok; setTimeout(() => { if (t === tok) fn(); }, ms); };
+
+  function pt(s) {
+    if (s === 'prod') return { x: 128, y: 188 };
+    const a = s.split(':');
+    if (a[0] === 'off') return { x: 150 + (+a[2]) * 104, y: LAY.offY[a[1]] - 4 };
+    if (a[0][0] === 'P') return { x: cellX(+a[1]) + 19, y: rowY(+a[0][1]) };
+    return { x: CXB, y: LAY.cy[s] };
+  }
+  function fly(fx, from, to, label, cls, delay) {
+    const go = () => {
+      const g = packet(fx, pt(from), pt(to), label, cls);
+      later(1250, () => { g.style.opacity = 0; });
+    };
+    delay ? later(delay, go) : go();
+  }
+
+  Player({
+    scenarios,
+    dwell: 3000,
+    init(g, ctx) {
+      const sc = scenarios[ctx.scenario];
+      E = { cells: [[], [], []], cons: {}, boxes: {}, off: {} };
+      LAY = { cy: {}, offY: {}, gcls: {} };
+      // 生产者
+      E.boxes.prod = svg('rect', { x: 16, y: 150, width: 112, height: 76, rx: 8, class: 'box' }, g);
+      svg('text', { x: 28, y: 176, class: 'title' }, g, 'Producer');
+      svg('text', { x: 28, y: 198, class: 'small muted' }, g, '按 key 哈希');
+      svg('text', { x: 28, y: 214, class: 'small muted' }, g, '选择分区');
+      // Topic
+      svg('rect', { x: 146, y: 24, width: 324, height: 300, rx: 10, class: 'box soft' }, g);
+      svg('text', { x: 160, y: 48, class: 'title' }, g, 'Topic: order（3 个分区）');
+      for (let p = 0; p < 3; p++) {
+        svg('text', { x: 160, y: rowY(p) + 5, class: 'mono title' }, g, 'P' + p);
+        for (let k = 0; k < 6; k++) {
+          const rect = svg('rect', { x: cellX(k), y: rowY(p) - 16, width: 38, height: 32, rx: 4, class: 'box dashed' }, g);
+          const t = svg('text', { x: cellX(k) + 19, y: rowY(p) + 5, 'text-anchor': 'middle', class: 'mono small' }, g, '');
+          E.cells[p].push({ rect, t });
+        }
+      }
+      svg('text', { x: 160, y: 314, class: 'small muted' }, g, '消费后消息仍保留在分区中');
+      // __consumer_offsets
+      const ids = sc.groups.map(gr => gr.id);
+      E.boxes.off = svg('rect', { x: 16, y: 340, width: 454, height: 112, rx: 8, class: 'box anim' }, g);
+      svg('text', { x: 28, y: 362, class: 'title' }, g, '__consumer_offsets');
+      svg('text', { x: 172, y: 362, class: 'small muted' }, g, '（group + topic + 分区 → 位移）');
+      ids.forEach((id, k) => {
+        const y = 394 + k * 30;
+        LAY.offY[id] = y;
+        svg('text', { x: 28, y, class: 'title ' + (k ? 'c-violet' : 'c-accent') }, g, id);
+        E.off[id] = [0, 1, 2].map(p => svg('text', { x: 120 + p * 104, y, class: 'mono' }, g, ''));
+      });
+      // 消费者组
+      E.wires = svg('g', {}, g);
+      let y = 24;
+      for (const gr of sc.groups) {
+        const h = 30 + gr.consumers.length * 54;
+        svg('rect', { x: GX, y, width: 250, height: h, rx: 10, class: 'box soft' }, g);
+        svg('text', { x: GX + 12, y: y + 20, class: 'title c-' + gr.cls }, g, '消费组 ' + gr.id);
+        gr.consumers.forEach((c, k) => {
+          const key = gr.id + ':' + c, cy0 = y + 30 + k * 54;
+          LAY.cy[key] = cy0 + 23;
+          LAY.gcls[key] = gr.cls;
+          const box = svg('rect', { x: CXB, y: cy0, width: CW, height: 46, rx: 6, class: 'box anim' }, g);
+          svg('text', { x: CXB + 10, y: cy0 + 19, class: 'title' }, g, c);
+          const parts = svg('text', { x: CXB + 36, y: cy0 + 19, class: 'mono small c-' + gr.cls }, g, '');
+          const done = svg('text', { x: CXB + 10, y: cy0 + 37, class: 'small' }, g, '');
+          E.cons[key] = { box, parts, done };
+        });
+        y += h + 14;
+      }
+      E.result = svg('text', { x: 380, y: 478, 'text-anchor': 'middle', class: 'title' }, g, '');
+    },
+    render(st, step, i, ctx) {
+      tok++;
+      const hot = step.hot || {};
+      st.parts.forEach((msgs, p) => E.cells[p].forEach((c, k) => {
+        const m = msgs[k];
+        c.t.textContent = m || '';
+        c.rect.setAttribute('class', 'box ' + (m ? (hot[`P${p}:${k}`] || '') : 'dashed'));
+      }));
+      while (E.wires.firstChild) E.wires.removeChild(E.wires.firstChild);
+      for (const key in E.cons) {
+        const c = E.cons[key], parts = st.assign[key] || [], s = st.st[key];
+        c.parts.textContent = parts.length ? '← ' + parts.join(', ') : '';
+        const done = st.done[key] || [];
+        c.done.textContent = s === 'down' ? '已宕机，离开消费组'
+          : s === 'idle' ? '空闲：没有分到分区'
+          : s === 'wait' ? '等待分配分区…'
+          : s === 'busy' ? '处理上一批中…' + (done.length ? '  已处理 ' + done.join(' ') : '')
+          : done.length ? '已处理 ' + done.join(' ') : '尚未拉取';
+        c.done.setAttribute('class', 'small ' + (s === 'down' ? 'c-bad' : s === 'idle' || s === 'busy' ? 'c-warn' : s === 'wait' ? 'muted' : ''));
+        const base = s === 'down' ? 'bad dashed' : s === 'idle' ? 'warn dashed' : '';
+        c.box.setAttribute('class', 'box anim ' + (hot[key] || base));
+        const y2 = LAY.cy[key];
+        for (const p of parts) {
+          const y1 = rowY(+p[1]);
+          svg('path', { d: `M 458 ${y1} C 486 ${y1}, 478 ${y2}, ${CXB} ${y2}`, class: 'wire thick ' + LAY.gcls[key] }, E.wires);
+        }
+      }
+      for (const id in E.off) E.off[id].forEach((t, p) => { t.textContent = `P${p} = ${st.off[id][p]}`; });
+      E.boxes.off.setAttribute('class', 'box anim ' + (hot.off || ''));
+      E.result.textContent = st.result || '';
+      E.result.setAttribute('class', 'title ' + (st.resultCls || ''));
+      for (const [from, to, label, cls, delay] of step.moves || []) fly(ctx.fx, from, to, label, cls, delay);
+    },
+  });
+})();
+</script>
+</body>
+</html>

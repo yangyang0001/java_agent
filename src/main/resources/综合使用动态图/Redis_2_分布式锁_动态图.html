@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Redis 分布式锁</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .stage .life { stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 4 5; }
+  .stage .life.on { stroke: var(--accent); stroke-dasharray: none; }
+  .stage .lbl-bg { fill: var(--surface); }
+  .stage .cross { stroke: var(--bad); stroke-width: 3; stroke-linecap: round; fill: none; }
+  .stage .hatch { stroke-dasharray: 3 3; }
+  .stage .wire.violet { stroke: var(--violet); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Redis · 2 · Distributed Lock</p>
+    <h1>Redis 分布式锁一定安全吗？</h1>
+    <p class="lede">不一定。正确的基本写法是 <code>SET key 唯一值 NX PX 过期时间</code> 加锁、Lua 脚本比较后再删除。但锁过期而业务没执行完（GC 停顿）、主从切换丢锁，都会让两个客户端同时持有锁。真正保证正确性要在资源侧做校验，比如 fencing token。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>时序图（时间从上往下）</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--ok)"></i>持有锁 / 成功</span>
+            <span><i class="sw" style="background:var(--violet)"></i>客户端 B 持有锁</span>
+            <span><i class="sw" style="background:var(--warn)"></i>等待 / 停顿</span>
+            <span><i class="sw" style="background:var(--bad)"></i>出问题的地方</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 500" role="img" aria-label="客户端、Redis 和共享资源之间的加锁、解锁时序"></svg>
+        <p class="cap">竖线是每个参与者的生命线，横向箭头是请求（实线）和响应（虚线）。竖条表示锁在 Redis 中存在的时间段。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel"><div class="panel-h"><h2>代码</h2></div><pre class="code" id="code"></pre></section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>问题</th><th>原因</th><th>缓解 / 解决</th></tr></thead>
+        <tbody>
+          <tr><td>① 锁过期了，业务还没执行完</td><td>业务慢或长时间 GC 停顿，锁到期被 B 拿走，A 醒来后仍以为自己持锁</td><td>看门狗续期（Redisson 默认 30s，每 10s 续期）；但解决不了 GC 停顿：停顿期间续期线程同样被暂停</td></tr>
+          <tr><td>② 主从切换导致锁丢失</td><td>主从复制是异步的，锁还没同步到 Slave，Master 就宕机，新 Master 上没有锁</td><td>RedLock：N（通常 5）个独立主节点，过半（≥ N/2+1）加锁成功且总耗时 &lt; 有效期才算成功；有效时间 = 有效期 − 加锁耗时；失败时向所有节点解锁</td></tr>
+          <tr><td>③ RedLock 也有争议</td><td>Martin Kleppmann：依赖时钟（时钟跳跃导致提前过期）；无法解决进程停顿和网络延迟；节点崩溃重启后丢锁（没有持久化或 fsync 不及时）</td><td>不要把正确性完全交给锁</td></tr>
+          <tr><td>④ 根本思路</td><td>锁服务无法知道持锁者是否“还活着”</td><td>Fencing Token：锁服务发放单调递增的 token，存储拒绝比已见过更小的 token；业务等价方案：乐观锁 version、唯一约束、状态机条件更新</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul style="margin-top:10px">
+      <li>正确的基本实现：<code>SET lock_key &lt;UUID&gt; NX PX 30000</code>（互斥和过期时间原子设置）；解锁用 Lua 脚本判断 value 是自己的才 <code>DEL</code>（防止误删别人的锁）。</li>
+      <li>锁只为提高效率（偶尔重复执行可以接受）：单节点 Redis 锁 + 看门狗就够了。</li>
+      <li>锁是为了正确性（绝对不能同时执行）：不能只依赖 Redis 锁，要在资源层面做 fencing / 幂等校验；ZooKeeper / etcd 的锁同样会受 GC 停顿影响，也需要 fencing。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet, arrow } = Player;
+  const textW = s => [...s].reduce((w, ch) => w + (ch.charCodeAt(0) > 255 ? 11 : 6.7), 0);
+
+  // 把每步的 add / del 累加成 state.show
+  function build(steps, first) {
+    let show = [...(first || [])];
+    for (const s of steps) {
+      show = show.filter(id => !(s.del || []).includes(id)).concat(s.add || []);
+      s.set = Object.assign({ show: [...show] }, s.set || {});
+    }
+    return steps;
+  }
+
+  const scenarios = [
+    {
+      label: '正确用法：NX PX + Lua 解锁',
+      cols: [{ id: 'A', x: 110, label: '客户端 A' }, { id: 'R', x: 380, label: 'Redis' }, { id: 'B', x: 640, label: '客户端 B' }],
+      items: [
+        { id: 'm1', t: 'msg', from: 'A', to: 'R', y: 100, label: 'SET lock uuidA NX PX 30000' },
+        { id: 'r1', t: 'msg', from: 'R', to: 'A', y: 126, label: 'OK', cls: 'ok', dashed: 1 },
+        { id: 'bA', t: 'bar', col: 'R', y1: 108, y2: 304, cls: 'ok', label: 'lock = uuidA' },
+        { id: 'n1', t: 'note', x: 400, y: 150, text: 'NX + PX 在一条命令里原子完成', cls: 'c-ok' },
+        { id: 'm2', t: 'msg', from: 'B', to: 'R', y: 176, label: 'SET lock uuidB NX PX 30000' },
+        { id: 'r2', t: 'msg', from: 'R', to: 'B', y: 202, label: '(nil) 锁已被占用', cls: 'warn', dashed: 1 },
+        { id: 'nB', t: 'block', col: 'B', y1: 216, y2: 352, cls: 'warn', label: '稍后重试' },
+        { id: 'actA', t: 'block', col: 'A', y1: 140, y2: 270, cls: 'ok', label: '执行业务' },
+        { id: 'm3', t: 'msg', from: 'A', to: 'R', y: 290, label: 'EVAL 比较 uuidA → DEL' },
+        { id: 'r3', t: 'msg', from: 'R', to: 'A', y: 316, label: '1（已删除）', cls: 'ok', dashed: 1 },
+        { id: 'n2', t: 'note', x: 400, y: 248, text: '直接 DEL 可能删掉别人的锁', cls: 'c-bad' },
+        { id: 'm4', t: 'msg', from: 'B', to: 'R', y: 372, label: 'SET lock uuidB NX PX 30000' },
+        { id: 'r4', t: 'msg', from: 'R', to: 'B', y: 398, label: 'OK', cls: 'ok', dashed: 1 },
+        { id: 'bB', t: 'bar', col: 'R', y1: 380, y2: 486, cls: 'violet', label: 'lock = uuidB', ly: 422 },
+      ],
+      code: ['SET lock uuidA NX PX 30000', '// ... 执行业务 ...', '-- 解锁 Lua 脚本', "if redis.call('get', KEYS[1])", '     == ARGV[1] then', "  return redis.call('del', KEYS[1])", 'end', 'return 0'],
+      steps: build([
+        { title: '参与者：两个客户端抢一把锁',
+          desc: '<p>客户端 A、B 要互斥地执行同一段业务，用 Redis 的一个 key 做锁。</p>' },
+        { title: 'A 加锁：SET NX PX', line: 1, add: ['m1', 'r1', 'bA'], fly: ['m1', 'r1'],
+          desc: '<p><code>NX</code>：key 不存在才设置，保证互斥。<code>PX 30000</code>：30 秒后自动过期，A 宕机也不会死锁。</p><p>value 用 <b>唯一值</b>（UUID），标明这把锁是谁的。</p>' },
+        { title: '为什么必须一条命令', line: 1, add: ['n1'],
+          desc: '<p class="bad">错误写法：先 <code>SETNX</code> 再 <code>EXPIRE</code>。如果两条命令之间进程崩溃，锁永远不过期，所有人都拿不到锁。</p><p class="ok"><code>SET ... NX PX</code> 一条命令同时完成互斥和过期时间设置，是原子的。</p>' },
+        { title: 'B 加锁失败', add: ['m2', 'r2', 'nB'], fly: ['m2', 'r2'],
+          desc: '<p>lock 已存在，<code>NX</code> 条件不满足，返回 <code>nil</code>。</p><p>B 只能稍后重试（自旋或订阅释放通知）。</p>' },
+        { title: 'A 执行业务', line: 2, add: ['actA'],
+          desc: '<p>A 在 30 秒内完成业务，一切正常。</p>' },
+        { title: 'A 用 Lua 脚本解锁', line: [4, 5, 6], add: ['m3', 'r3'], fly: ['m3', 'r3'],
+          desc: '<p>解锁时先 <code>GET</code> 判断 value 是不是自己的 <code>uuidA</code>，是才 <code>DEL</code>。</p><p>两步放进一个 Lua 脚本，Redis 单线程执行，中间不会插入别的命令。</p>' },
+        { title: '为什么要先比较再删', line: [4, 5], add: ['n2'],
+          desc: '<p class="bad">如果 A 的锁已经过期、被 B 拿到，A 再执行裸 <code>DEL</code>，删掉的就是 <b>B 的锁</b>，第三个客户端又能进来。</p><p>比较 value 能防止误删；用 Lua 是为了让“比较 + 删除”原子执行。</p>' },
+        { title: 'B 重试成功', line: 1, add: ['m4', 'r4', 'bB'], fly: ['m4', 'r4'],
+          desc: '<p>锁已释放，B 加锁成功。</p><p>这就是单节点 Redis 锁的正确姿势。但它 <b>仍然不是绝对安全</b>，后面三个场景说明原因。</p>', dwell: 3600 },
+      ]),
+    },
+    {
+      label: '锁过期 + GC 停顿，看门狗也救不了',
+      cols: [{ id: 'A', x: 96, label: '客户端 A' }, { id: 'R', x: 296, label: 'Redis' }, { id: 'B', x: 496, label: '客户端 B' }, { id: 'S', x: 676, label: '共享资源', sub: 'x = 0' }],
+      items: [
+        { id: 't0', t: 'tick', y: 100, text: 't=0s' },
+        { id: 'm1', t: 'msg', from: 'A', to: 'R', y: 96, label: 'SET lock A NX PX 30000' },
+        { id: 'r1', t: 'msg', from: 'R', to: 'A', y: 120, label: 'OK', cls: 'ok', dashed: 1 },
+        { id: 'bA', t: 'bar', col: 'R', y1: 104, y2: 300, cls: 'ok', label: 'lock = A' },
+        { id: 't1', t: 'tick', y: 154, text: 't=10s' },
+        { id: 'w1', t: 'msg', from: 'A', to: 'R', y: 150, label: '看门狗 PEXPIRE 30000', cls: 'ok' },
+        { id: 'nw', t: 'note', x: 316, y: 170, text: '续期到 t=40s', cls: 'c-ok' },
+        { id: 't2', t: 'tick', y: 194, text: 't=12s' },
+        { id: 'gc', t: 'block', col: 'A', y1: 186, y2: 424, cls: 'warn', label: 'Full GC 停顿', label2: '(STW 38s)' },
+        { id: 't3', t: 'tick', y: 236, text: 't=20s' },
+        { id: 'w2', t: 'msg', from: 'A', to: 'R', y: 232, label: '看门狗续期 ✗ 线程被暂停', cls: 'bad', dashed: 1 },
+        { id: 't4', t: 'tick', y: 304, text: 't=40s' },
+        { id: 'xA', t: 'cross', col: 'R', y: 300 },
+        { id: 'ne', t: 'note', x: 316, y: 304, text: 'lock 过期，被删除', cls: 'c-bad' },
+        { id: 't5', t: 'tick', y: 336, text: 't=41s' },
+        { id: 'm2', t: 'msg', from: 'B', to: 'R', y: 332, label: 'SET lock B NX PX 30000' },
+        { id: 'r2', t: 'msg', from: 'R', to: 'B', y: 356, label: 'OK', cls: 'ok', dashed: 1 },
+        { id: 'bB', t: 'bar', col: 'R', y1: 340, y2: 490, cls: 'violet', label: 'lock = B', ly: 378 },
+        { id: 't6', t: 'tick', y: 394, text: 't=42s' },
+        { id: 'm3', t: 'msg', from: 'B', to: 'S', y: 390, label: 'write(x = B)', cls: 'violet' },
+        { id: 't7', t: 'tick', y: 444, text: 't=50s' },
+        { id: 'm4', t: 'msg', from: 'A', to: 'S', y: 440, label: 'write(x = A) ✗', cls: 'bad', lx: 590 },
+        { id: 'nS', t: 'note', x: 676, y: 474, text: '两人都写了 ✗', cls: 'c-bad', anchor: 'middle' },
+      ],
+      code: ['// Redisson', 'RLock lock = redisson.getLock("lock");', 'lock.lock(); // 不传超时 → 启用看门狗', 'try {', '    doBusiness(); // 期间发生长时间 GC', '    write(x);', '} finally {', '    lock.unlock();', '}'],
+      steps: build([
+        { title: 'A 加锁，有效期 30 秒', line: [2, 3], add: ['t0', 'm1', 'r1', 'bA'], fly: ['m1', 'r1'],
+          desc: '<p>t=0s，A 加锁成功，锁 30 秒后过期。</p>' },
+        { title: '看门狗续期', line: 3, add: ['t1', 'w1', 'nw'], fly: ['w1'],
+          desc: '<p>Redisson 的 <b>看门狗</b>：不指定超时时间加锁时，默认锁 30 秒，后台线程 <b>每 10 秒</b> 检查一次，线程还持有锁就把过期时间重置为 30 秒。</p><p>业务执行慢的问题由此缓解。</p>' },
+        { title: 'A 进入长时间 GC 停顿', line: 5, add: ['t2', 'gc'],
+          desc: '<p>t=12s，A 所在的 JVM 发生 Full GC，<b>Stop-The-World</b>：所有 Java 线程都停下来。</p>' },
+        { title: '看门狗线程也被暂停了', add: ['t3', 'w2'],
+          desc: '<p class="bad">看门狗本身也是 JVM 里的一个线程，STW 期间同样被暂停，t=20s 的续期发不出去。</p><p>所以 <b>看门狗解决不了 GC 停顿</b>（网络长时间中断也一样）。</p>' },
+        { title: '锁过期', add: ['t4', 'xA', 'ne'],
+          desc: '<p>最后一次续期在 t=10s，锁在 t=40s 到期，Redis 自动删除 key。</p><p>A 还在 GC 中，完全不知道。</p>' },
+        { title: 'B 加锁成功', add: ['t5', 'm2', 'r2', 'bB'], fly: ['m2', 'r2'],
+          desc: '<p>t=41s，lock 不存在了，B 的 <code>SET NX</code> 成功。从 Redis 的角度看，这完全正常。</p>' },
+        { title: 'B 写共享资源', add: ['t6', 'm3'], fly: ['m3'], set: { val: { S: 'x = B' } },
+          desc: '<p>B 在锁的保护下写入 <code>x = B</code>。</p>' },
+        { title: 'A 醒来，继续写共享资源', line: 6, add: ['t7', 'm4', 'nS'], fly: ['m4'], set: { val: { S: 'x = A ✗' }, valCls: { S: 'c-bad' } },
+          desc: '<p class="bad">t=50s，A 的 GC 结束，代码从停下的地方继续执行。它不会再检查锁，直接写入 <code>x = A</code>，覆盖了 B 的结果。</p><p>A 和 B 在同一时段都认为自己持有锁，<b>互斥被破坏</b>。</p>' },
+        { title: '结论：带过期时间的锁无法保证互斥', line: 8,
+          desc: '<p>A 最后解锁时，Lua 脚本发现 value 不是自己的，返回 0，不会误删 B 的锁，但伤害已经造成。</p><p>只要锁会过期，持锁者就可能在“自以为持锁”时被停顿。需要资源侧校验，见场景 4 的 fencing token。</p>', dwell: 3800 },
+      ]),
+    },
+    {
+      label: '主从切换丢锁（RedLock）',
+      cols: [{ id: 'A', x: 96, label: '客户端 A' }, { id: 'M', x: 286, label: 'Master' }, { id: 'S', x: 466, label: 'Replica' }, { id: 'B', x: 656, label: '客户端 B' }],
+      items: [
+        { id: 'm1', t: 'msg', from: 'A', to: 'M', y: 96, label: 'SET lock A NX PX 30000' },
+        { id: 'r1', t: 'msg', from: 'M', to: 'A', y: 120, label: 'OK', cls: 'ok', dashed: 1 },
+        { id: 'bA', t: 'bar', col: 'M', y1: 104, y2: 196, cls: 'ok', label: 'lock = A' },
+        { id: 'rep', t: 'msg', from: 'M', to: 'S', y: 152, label: '异步复制 lock=A …', cls: 'warn', dashed: 1 },
+        { id: 'xM', t: 'cross', col: 'M', y: 200 },
+        { id: 'nM', t: 'note', x: 306, y: 222, text: 'Master 宕机，复制没发出', cls: 'c-bad' },
+        { id: 'nF', t: 'note', x: 466, y: 262, text: '哨兵：把 Replica 提升为新 Master', cls: 'c-warn', anchor: 'middle' },
+        { id: 'nE', t: 'note', x: 486, y: 290, text: '新 Master 上没有 lock', cls: 'c-bad' },
+        { id: 'm2', t: 'msg', from: 'B', to: 'S', y: 320, label: 'SET lock B NX PX 30000' },
+        { id: 'r2', t: 'msg', from: 'S', to: 'B', y: 344, label: 'OK', cls: 'ok', dashed: 1 },
+        { id: 'bB', t: 'bar', col: 'S', y1: 328, y2: 392, cls: 'violet', label: 'lock = B', ly: 368 },
+        { id: 'hA', t: 'block', col: 'A', y1: 130, y2: 392, cls: 'ok', label: 'A 持锁' },
+        { id: 'hB', t: 'block', col: 'B', y1: 352, y2: 392, cls: 'violet', label: 'B 持锁' },
+        { id: 'nX', t: 'note', x: 380, y: 382, text: 'A、B 同时持有锁 ✗', cls: 'c-bad', anchor: 'middle' },
+        { id: 'rl', t: 'redlock', y: 420 },
+      ],
+      code: ['# 单 Master + Replica + 哨兵', 'SET lock A NX PX 30000  → OK', '# 复制是异步的: 先回 OK 再复制', '', '# RedLock: 5 个独立的 Master', '# 过半(>=3)成功 且 耗时 < 有效期', '# 有效时间 = 有效期 - 加锁耗时', '# 失败 → 向所有节点解锁'],
+      steps: build([
+        { title: 'A 在 Master 上加锁成功', line: 2, add: ['m1', 'r1', 'bA'], fly: ['m1', 'r1'],
+          desc: '<p>主从 + 哨兵部署。A 的 <code>SET NX</code> 写入 Master，Master 立即返回 OK。</p>' },
+        { title: '复制是异步的', line: 3, add: ['rep', 'hA'],
+          desc: '<p class="warn">Redis 主从复制是 <b>异步</b> 的：Master 先回复客户端，再把命令发给 Replica。</p><p>这时 lock 只存在于 Master 上。</p>' },
+        { title: 'Master 宕机', add: ['xM', 'nM'], set: { dead: { M: 1 }, itemCls: { rep: 'bad' } },
+          desc: '<p>复制命令还没发出，Master 就宕机了，<code>lock=A</code> 随之丢失。</p>' },
+        { title: '哨兵故障转移', add: ['nF', 'nE'], set: { head: { S: '新 Master' } },
+          desc: '<p>哨兵发现 Master 下线，把 Replica 提升为 <b>新 Master</b>，客户端改连它。</p><p>新 Master 的数据里 <b>没有</b> 这把锁。</p>' },
+        { title: 'B 在新 Master 上加锁成功', add: ['m2', 'r2', 'bB', 'hB'], fly: ['m2', 'r2'],
+          desc: '<p>B 的 <code>SET NX</code> 在新 Master 上成功了。</p>' },
+        { title: 'A、B 同时持有锁', add: ['nX'],
+          desc: '<p class="bad">A 认为自己持锁（它收到过 OK），B 也认为自己持锁，互斥被破坏。</p><p><code>WAIT</code> 命令可以等待复制，但也不能保证故障转移时选中的就是已复制的 Replica。</p>' },
+        { title: '缓解：RedLock（以及它的争议）', line: [5, 6, 7, 8], add: ['rl'],
+          desc: '<p><b>RedLock</b>：部署 5 个 <b>相互独立</b> 的 Redis 主节点。记录开始时间，依次加锁；在 <b>过半（≥ 3）</b> 节点成功且总耗时 &lt; 有效期才算成功，实际有效时间 = 有效期 − 加锁耗时；失败时向所有节点解锁。</p><p class="warn">Martin Kleppmann 的批评：依赖各节点时钟（时钟跳跃会让锁提前过期）；解决不了客户端 GC 停顿和网络延迟；节点崩溃重启时如果没有持久化，锁会丢失。</p>', dwell: 4200 },
+      ]),
+    },
+    {
+      label: 'Fencing Token：让存储拒绝旧请求',
+      cols: [{ id: 'A', x: 96, label: '客户端 A' }, { id: 'L', x: 296, label: '锁服务' }, { id: 'B', x: 496, label: '客户端 B' }, { id: 'S', x: 676, label: '存储', sub: 'max_token = 0' }],
+      items: [
+        { id: 'm1', t: 'msg', from: 'A', to: 'L', y: 96, label: 'acquire(lock)' },
+        { id: 'r1', t: 'msg', from: 'L', to: 'A', y: 120, label: 'OK, token = 33', cls: 'ok', dashed: 1 },
+        { id: 'bA', t: 'bar', col: 'L', y1: 104, y2: 200, cls: 'ok', label: 'A · 33' },
+        { id: 'gc', t: 'block', col: 'A', y1: 140, y2: 360, cls: 'warn', label: 'GC 停顿' },
+        { id: 'xA', t: 'cross', col: 'L', y: 200 },
+        { id: 'ne', t: 'note', x: 316, y: 222, text: '锁过期', cls: 'c-bad' },
+        { id: 'm2', t: 'msg', from: 'B', to: 'L', y: 246, label: 'acquire(lock)' },
+        { id: 'r2', t: 'msg', from: 'L', to: 'B', y: 270, label: 'OK, token = 34', cls: 'ok', dashed: 1 },
+        { id: 'bB', t: 'bar', col: 'L', y1: 254, y2: 470, cls: 'violet', label: 'B · 34', ly: 292 },
+        { id: 'm3', t: 'msg', from: 'B', to: 'S', y: 304, label: 'write(data, 34)', cls: 'violet' },
+        { id: 'r3', t: 'msg', from: 'S', to: 'B', y: 328, label: 'OK', cls: 'ok', dashed: 1 },
+        { id: 'm4', t: 'msg', from: 'A', to: 'S', y: 390, label: 'write(data, token = 33)', cls: 'warn' },
+        { id: 'r4', t: 'msg', from: 'S', to: 'A', y: 416, label: '拒绝：33 < 34', cls: 'bad', dashed: 1 },
+        { id: 'nS', t: 'note', x: 676, y: 452, text: '数据安全 ✓', cls: 'c-ok', anchor: 'middle' },
+      ],
+      code: ['// 锁服务: 每次发放递增的 token', 'token = INCR lock:token  // 33, 34', '// 存储: 拒绝更小的 token', 'if (token < maxToken) reject();', 'maxToken = token; write(data);', '// 业务里的等价做法: 乐观锁', 'UPDATE t SET v = ?, ver = ver + 1', ' WHERE id = ? AND ver = ?'],
+      steps: build([
+        { title: 'A 获取锁，同时拿到 token 33', line: [1, 2], add: ['m1', 'r1', 'bA'], fly: ['m1', 'r1'],
+          desc: '<p>锁服务每次发放锁时，附带一个 <b>单调递增</b> 的数字：fencing token。</p><p>A 拿到 <code>token = 33</code>。</p>' },
+        { title: 'A 发生长时间 GC 停顿', add: ['gc'],
+          desc: '<p>和场景 2 一样，A 停顿了很久。</p>' },
+        { title: '锁过期，B 拿到 token 34', line: 2, add: ['xA', 'ne', 'm2', 'r2', 'bB'], fly: ['m2', 'r2'],
+          desc: '<p>A 的锁过期，B 获取锁成功，token 递增为 <code>34</code>。</p>' },
+        { title: 'B 带着 token 34 写入', line: [4, 5], add: ['m3', 'r3'], fly: ['m3', 'r3'], set: { val: { S: 'max_token = 34' }, valCls: { S: 'c-violet' } },
+          desc: '<p>存储收到写请求时检查 token：34 ≥ 当前最大值 0，接受，并 <b>记录 max_token = 34</b>。</p>' },
+        { title: 'A 醒来，带着旧 token 33 写入', line: 4, badLine: 4, add: ['m4', 'r4', 'nS'], fly: ['m4', 'r4'], set: { valCls: { S: 'c-ok' } },
+          desc: '<p>A 仍以为自己持锁，发起写入，但它带的是 <code>token = 33</code>。</p><p class="ok">存储发现 33 &lt; 34，<b>拒绝</b> 这次写入。即使锁被两个客户端同时“持有”，数据也不会被破坏。</p>' },
+        { title: '本质：在资源侧做校验', line: [6, 7, 8],
+          desc: '<p>锁只负责“尽量”互斥，<b>正确性由存储来兜底</b>。业务中的等价做法：数据库乐观锁（version）、唯一约束、状态机条件更新（<code>UPDATE ... WHERE status = \'INIT\'</code>）保证幂等。</p><p>Redis 的 <code>SET NX</code> 本身不产生 token，可以用 <code>INCR</code> 生成；ZooKeeper 可用节点的 zxid / 序号，etcd 可用 revision。</p>', dwell: 4000 },
+      ]),
+    },
+  ];
+
+  let E, SC;
+  const colX = id => SC.cols.find(c => c.id === id).x;
+
+  function drawItem(g, it) {
+    const ig = svg('g', { class: 'anim hide' }, g);
+    if (it.t === 'msg') {
+      const x1 = colX(it.from), x2 = colX(it.to), dir = Math.sign(x2 - x1);
+      const cls = (it.cls || 'accent') + (it.dashed ? ' dashed' : '');
+      it.el = arrow(ig, x1 + dir * 7, it.y, x2 - dir * 7, it.y, cls);
+      if (it.cls === 'violet') it.el.setAttribute('marker-end', 'url(#arrow-violet)');
+      const mx = it.lx || (x1 + x2) / 2, w = textW(it.label) + 10;
+      svg('rect', { x: mx - w / 2, y: it.y - 19, width: w, height: 15, rx: 3, class: 'lbl-bg' }, ig);
+      it.txt = svg('text', { x: mx, y: it.y - 7, 'text-anchor': 'middle', class: 'mono small c-' + (it.cls || 'accent') }, ig, it.label);
+    } else if (it.t === 'bar') {
+      const x = colX(it.col);
+      svg('rect', { x: x - 6, y: it.y1, width: 12, height: it.y2 - it.y1, rx: 3, class: 'box ' + it.cls }, ig);
+      svg('text', { x: x + 12, y: it.ly || it.y1 + 16, class: 'small c-' + it.cls }, ig, it.label);
+    } else if (it.t === 'block') {
+      const x = colX(it.col);
+      svg('rect', { x: x - 48, y: it.y1, width: 96, height: it.y2 - it.y1, rx: 6, class: 'box ' + it.cls + (it.cls === 'warn' ? ' hatch' : '') }, ig);
+      const my = (it.y1 + it.y2) / 2;
+      svg('text', { x, y: my + (it.label2 ? -4 : 4), 'text-anchor': 'middle', class: 'small c-' + it.cls }, ig, it.label);
+      if (it.label2) svg('text', { x, y: my + 14, 'text-anchor': 'middle', class: 'mono small c-' + it.cls }, ig, it.label2);
+    } else if (it.t === 'note') {
+      const w = textW(it.text) + 10, x0 = it.anchor === 'middle' ? it.x - w / 2 : it.x - 5;
+      svg('rect', { x: x0, y: it.y - 13, width: w, height: 18, rx: 3, class: 'lbl-bg' }, ig);
+      svg('text', { x: it.x, y: it.y, 'text-anchor': it.anchor || 'start', class: 'small ' + (it.cls || '') }, ig, it.text);
+    } else if (it.t === 'tick') {
+      svg('text', { x: 6, y: it.y, class: 'mono small muted' }, ig, it.text);
+    } else if (it.t === 'cross') {
+      const x = colX(it.col);
+      svg('path', { d: `M${x - 10},${it.y - 10} l20,20 M${x + 10},${it.y - 10} l-20,20`, class: 'cross' }, ig);
+    } else if (it.t === 'redlock') {
+      // RedLock 示意: 5 个独立主节点, A 在其中 3 个上加锁成功
+      svg('rect', { x: 16, y: it.y - 8, width: 728, height: 78, rx: 8, class: 'box soft' }, ig);
+      svg('text', { x: 28, y: it.y + 14, class: 'title' }, ig, 'RedLock');
+      svg('text', { x: 28, y: it.y + 34, class: 'small muted' }, ig, '5 个独立主节点');
+      const res = ['ok', 'ok', 'bad', 'ok', 'bad'];
+      res.forEach((r, k) => {
+        const x = 150 + k * 92;
+        svg('rect', { x, y: it.y + 2, width: 80, height: 34, rx: 6, class: 'box ' + r }, ig);
+        svg('text', { x: x + 40, y: it.y + 24, 'text-anchor': 'middle', class: 'mono small c-' + r }, ig, `R${k + 1} ${r === 'ok' ? '✓' : '✗'}`);
+      });
+      svg('text', { x: 620, y: it.y + 16, class: 'small c-ok' }, ig, '3 / 5 ≥ 过半');
+      svg('text', { x: 620, y: it.y + 34, class: 'small c-ok' }, ig, '且耗时 < 有效期');
+      svg('text', { x: 150, y: it.y + 58, class: 'small muted' }, ig, '加锁成功；有效时间 = 有效期 − 加锁耗时');
+    }
+    it.g = ig;
+    return ig;
+  }
+
+  Player({
+    scenarios,
+    dwell: 3000,
+    init(g, ctx) {
+      SC = scenarios[ctx.scenario];
+      E = { head: {}, sub: {}, life: {}, items: {}, tok: 0 };
+      for (const c of SC.cols) {
+        E.life[c.id] = svg('line', { x1: c.x, y1: 58, x2: c.x, y2: 494, class: 'life' }, g);
+        E.head[c.id] = { r: svg('rect', { x: c.x - 62, y: 12, width: 124, height: 46, rx: 8, class: 'box anim' }, g) };
+        E.head[c.id].t = svg('text', { x: c.x, y: 31, 'text-anchor': 'middle', class: 'title' }, g, c.label);
+        E.sub[c.id] = svg('text', { x: c.x, y: 49, 'text-anchor': 'middle', class: 'mono small muted' }, g, c.sub || '');
+      }
+      const root = ctx.svg;
+      if (!root.querySelector('#arrow-violet')) {
+        const defs = root.querySelector('defs') || svg('defs', {}, root);
+        const m = svg('marker', { id: 'arrow-violet', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, defs);
+        svg('path', { d: 'M0,0 L10,5 L0,10 z', style: 'fill: var(--violet)' }, m);
+      }
+      for (const it of SC.items) { drawItem(g, it); E.items[it.id] = it; }
+    },
+    render(st, step, i, ctx) {
+      const tok = ++E.tok;
+      const show = new Set(st.show || []);
+      const fly = step.fly || [];
+      for (const id in E.items) {
+        const it = E.items[id];
+        it.g.classList.toggle('hide', !show.has(id));
+        const k = fly.indexOf(id);
+                if (k >= 0) it.g.style.opacity = 0;
+        else it.g.style.opacity = '';
+        if (it.t === 'msg') {
+          const c = (st.itemCls || {})[id];
+          if (c) { it.el.setAttribute('class', `wire ${c} dashed`); it.txt.setAttribute('class', 'mono small c-' + c); }
+        }
+      }
+      // 新出现的消息: 先飞包, 再显示箭头
+      fly.forEach((id, k) => {
+        const it = E.items[id];
+        setTimeout(() => {
+          if (E.tok !== tok) return;
+          const x1 = colX(it.from), x2 = colX(it.to);
+          packet(ctx.fx, { x: x1, y: it.y }, { x: x2, y: it.y }, '', it.cls || 'accent');
+          setTimeout(() => { if (E.tok === tok) it.g.style.opacity = ''; }, 550);
+        }, k * 750);
+      });
+      for (const c of SC.cols) {
+        const dead = (st.dead || {})[c.id];
+        E.head[c.id].r.setAttribute('class', 'box anim' + (dead ? ' bad dashed' : (st.head || {})[c.id] ? ' warn' : ''));
+        E.head[c.id].t.textContent = (st.head || {})[c.id] || c.label;
+        const v = (st.val || {})[c.id];
+        E.sub[c.id].textContent = v || c.sub || '';
+        E.sub[c.id].setAttribute('class', 'mono small ' + ((st.valCls || {})[c.id] || (v ? 'c-violet' : 'muted')));
+        E.life[c.id].setAttribute('class', 'life');
+      }
+    },
+  });
+})();
+</script>
+</body>
+</html>

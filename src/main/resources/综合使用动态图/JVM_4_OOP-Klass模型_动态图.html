@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OOP-Klass 模型动态图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .code { font-size: 11.5px; }
+  .stage .col-bg { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 5 4; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">JVM · 4 · OOP-Klass</p>
+    <h1>OOP-Klass 二分模型：对象只存数据，类元数据只存一份</h1>
+    <p class="lede">HotSpot 用两部分表示一个 Java 对象：堆里的 <b>OOP</b>（对象头 + 实例字段，每个对象一份），和元空间里的 <b>Klass</b>（字段布局、方法、vtable、常量池，每个类一份）。对象头里的类型指针把两者连起来；<code>java.lang.Class</code> 对象是 Klass 在堆里的镜像（mirror）。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>栈、堆与元空间</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--accent)"></i>本步变化 / 访问路径</span>
+            <span><i class="sw" style="background:var(--ok)"></i>Class 镜像（mirror）</span>
+            <span><i class="sw" style="background:var(--violet)"></i>Klass 元数据</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 480" role="img" aria-label="Person p = new Person() 时栈中的引用、堆中的 instanceOop 和 Class 镜像、元空间中的 InstanceKlass 之间的指针关系"></svg>
+        <p class="cap">按 JDK 8 HotSpot 画出，开启压缩类指针时类型指针占 4 字节，Klass 位于元空间中的压缩类空间。箭头是指针，移动的圆点是一次访问的路径。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel"><div class="panel-h"><h2>代码</h2></div><pre class="code" id="code"></pre></section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <ul>
+      <li><b>OOP</b>（Ordinary Object Pointer）表示对象实例：对象头（Mark Word + 类型指针）+ 实例字段，分配在堆中。<b>Klass</b> 表示类元数据：字段布局、方法、虚方法表（vtable / itable）、常量池、父类、访问标志等，JDK8+ 存在元空间。</li>
+      <li>一个类只有一个 Klass，这个类的所有实例都通过对象头中的类型指针指向同一个 Klass。</li>
+      <li>为什么拆开：C++ 中带虚函数的对象每个都要带一个 vptr；拆分后实例只保留数据和一个类型指针，方法分派信息只在 Klass 中存一份，对象更小，布局也可控——<b>数据（OOP，每个对象一份）和描述（Klass，每个类一份）分离</b>。</li>
+      <li>体系：<code>oopDesc</code> → <code>instanceOopDesc</code> / <code>arrayOopDesc</code>（<code>objArrayOopDesc</code>、<code>typeArrayOopDesc</code>）；<code>Klass</code> → <code>InstanceKlass</code>（<code>InstanceMirrorKlass</code>、<code>InstanceRefKlass</code>、<code>InstanceClassLoaderKlass</code>）/ <code>ArrayKlass</code>（<code>ObjArrayKlass</code>、<code>TypeArrayKlass</code>）。</li>
+      <li>加载类时同时在堆中创建 <code>java.lang.Class</code> 镜像：<code>InstanceKlass._java_mirror</code> 指向它，Class 对象内部也有字段反向指向 Klass；<code>getClass()</code>、反射拿到的都是 mirror；JDK7 起静态变量存放在 mirror 中（在堆里）。</li>
+      <li><code>new Person()</code>：类未加载则先加载（InstanceKlass + mirror），再在堆中分配 instanceOop、设置 Mark Word、类型指针指向 InstanceKlass、字段零值、执行构造方法。<code>p.say()</code>：OOP → Klass → vtable，这就是动态分派。<code>p.getClass()</code>：OOP → Klass → <code>_java_mirror</code>。</li>
+      <li>对象头里的"类型指针"就是 OOP 指向 Klass 的指针；开启 <code>-XX:+UseCompressedClassPointers</code>（默认）时占 4 字节，Klass 放在压缩类空间（Compressed Class Space，默认 1G）。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, move } = Player;
+
+  // 坐标
+  const OOP1 = 50, OOP2 = 210, MIR = 370, KL = 50;
+  const R = (top, k) => top + 30 + k * 28;            // oop 内第 k 行的 y
+  const A = {
+    p: { x: 138, y: 125 }, s2: { x: 138, y: 175 },
+    kp1: { x: 440, y: R(OOP1, 1) + 12 }, kp2: { x: 440, y: R(OOP2, 1) + 12 },
+    klass: { x: 626, y: 72 }, vsay: { x: 626, y: 260 }, jm: { x: 626, y: 412 },
+    mirror: { x: 340, y: 390 },
+  };
+
+  // 移动的访问路径：依次经过各个点，最后淡出
+  function trail(fx, pts, label, cls, delay) {
+    const g = svg('g', { class: 'anim hide' }, fx);
+    move(g, pts[0].x, pts[0].y);
+    svg('circle', { r: 7, class: 'dot ' + (cls || '') }, g);
+    if (label) svg('text', { x: 11, y: -9, class: 'mono small c-' + (cls || 'accent') }, g, label);
+    g.getBoundingClientRect();
+    const d = delay || 0;
+    pts.forEach((p, k) => setTimeout(() => { if (k === 0) g.classList.remove('hide'); else move(g, p.x, p.y); }, d + 60 + k * 760));
+    setTimeout(() => g.classList.add('hide'), d + 60 + pts.length * 760 + 300);
+  }
+
+  const S0 = { klass: false, mirror: false, oop1: false, hdr1: false, f1: ['', ''], oop2: false, hdr2: false, f2: ['', ''], count: '0', refs: { p: false, s2: false } };
+  const sc1 = {
+    label: 'Person p = new Person(...)',
+    slot2: 'c',
+    code: ['class Person {', '  static int count;', '  String name; int age;', '  Person(String n, int a) {', '    name = n; age = a; count++;', '  }',
+      '  void say() { ... }', '}', 'Person p = new Person("Tom", 18);', 'p.say();', 'Class<?> c = p.getClass();'],
+    state: S0,
+    steps: [
+      { title: 'new Person()：类还没加载', line: 9,
+        desc: '<p>执行 <code>new</code> 指令时，先看 Person 是否已经加载。</p><p>还没加载，就要先走类加载流程。</p>' },
+      { title: '类加载：元空间生成 InstanceKlass', line: [1, 2, 3, 4, 5, 6, 7, 8], hot: ['klass'],
+        desc: '<p>类加载器解析 class 文件，在<b>元空间</b>创建 <code>InstanceKlass</code>：字段布局、方法、<b>vtable</b>、常量池、父类……</p><p>Klass 是 JVM 内部的 C++ 对象，Java 代码无法直接访问。</p>',
+        set: { klass: true } },
+      { title: '同时在堆中创建 Class 镜像', line: 2, hot: ['mirror', 'jm', 'mk'],
+        desc: '<p>JVM 同时在<b>堆</b>中创建 <code>java.lang.Class</code> 对象，叫 <b>mirror</b>（镜像）。</p><p><code>_java_mirror</code> 指向它，Class 对象内部也有字段<b>反向指向 Klass</b>。</p><p>JDK7 起静态变量 <code>count</code> 存在 mirror 里，所以在堆中。</p>',
+        set: { mirror: true } },
+      { title: '堆中分配 instanceOop，字段置零', line: 9, hot: ['name1', 'age1'],
+        desc: '<p>按 Klass 里记录的对象大小，在堆中分配内存（指针碰撞 / TLAB）。</p><p>实例字段先赋<b>零值</b>：<code>name = null</code>，<code>age = 0</code>。</p>',
+        set: { oop1: true, f1: ['null', '0'] } },
+      { title: '设置对象头：类型指针指向 Klass', line: 9, hot: ['mw1', 'kp1', 'klass'],
+        desc: '<p>写入 Mark Word（无锁 001）。</p><p><b>类型指针</b>（Klass Pointer）指向元空间里的 <code>InstanceKlass</code>，开启压缩类指针时占 4 字节。</p>',
+        set: { hdr1: true } },
+      { title: '执行构造方法 <init>', line: [4, 5], hot: ['name1', 'age1', 'count'],
+        desc: '<p><code>invokespecial &lt;init&gt;</code>：给字段赋值 <code>name = "Tom"</code>、<code>age = 18</code>。</p><p><code>count++</code> 修改的是 mirror 中的静态变量。</p>',
+        set: { f1: ['"Tom"', '18'], count: '1' } },
+      { title: '栈中的 p 指向对象', line: 9, hot: ['p'],
+        desc: '<p>局部变量 <code>p</code> 在栈帧的局部变量表里，存的是对象在堆中的地址。</p><p>HotSpot 用<b>直接指针</b>访问对象：p → OOP。</p>',
+        set: { refs: { p: true } } },
+      { title: 'p.say()：p → OOP → Klass', line: 10, hot: ['kp1', 'klass'], trail: [['p', 'kp1', 'klass']],
+        desc: '<p>通过 <code>p</code> 找到对象，再通过对象头里的<b>类型指针</b>找到 <code>InstanceKlass</code>。</p>' },
+      { title: '查 vtable，找到实际方法', line: 10, hot: ['vsay'], trail: [['klass', 'vsay']],
+        desc: '<p><code>invokevirtual</code> 按 <code>say()</code> 在 <b>vtable</b> 中的下标取出实际要调用的方法。</p><p>子类重写时，同一下标放的是子类的方法——这就是<b>多态（动态分派）</b>在 JVM 中的实现。</p>' },
+      { title: 'p.getClass()：OOP → Klass → _java_mirror', line: 11, hot: ['jm', 'mirror'], trail: [['p', 'kp1', 'klass', 'jm', 'mirror']], dwell: 4400,
+        desc: '<p>沿类型指针找到 Klass，再取 <code>_java_mirror</code>，返回堆中的 Class 对象。</p><p>反射拿到的也都是这个 mirror。</p>',
+        set: { refs: { s2: true } } },
+      { title: '小结：数据和描述分离', dwell: 3800,
+        desc: '<p>OOP 只存<b>对象头 + 实例字段</b>，每个对象一份；方法、vtable 等只在 Klass 里存<b>一份</b>。</p><p>如果直接映射成带虚函数的 C++ 对象，每个实例都要多带一个 vptr，布局也不受控制。</p>' },
+    ],
+  };
+
+  const S2 = { ...S0, klass: true, mirror: true, oop1: true, hdr1: true, f1: ['"Tom"', '18'], count: '1', refs: { p: true, s2: false } };
+  const sc2 = {
+    label: '同一个类的第二个对象',
+    slot2: 'p2',
+    code: ['Person p  = new Person("Tom", 18);', 'Person p2 = new Person("Amy", 20);', 'p2.say();', 'p.getClass() == p2.getClass();', '// → true'],
+    state: S2,
+    steps: [
+      { title: '已有：一个对象、Klass、mirror', line: 1,
+        desc: '<p>第一个 Person 对象已经创建好，类已经加载。</p>' },
+      { title: '再 new Person()：类已加载', line: 2, hot: ['klass', 'mirror'],
+        desc: '<p>Person 已经加载过了，<b>不会再创建</b>第二个 InstanceKlass，也不会有第二个 mirror。</p>' },
+      { title: '分配第二个 instanceOop', line: 2, hot: ['name2', 'age2'],
+        desc: '<p>在堆中再分配一个对象，字段先置零值。</p><p>它有<b>自己的</b>对象头和实例字段。</p>',
+        set: { oop2: true, f2: ['null', '0'] } },
+      { title: '类型指针指向同一个 Klass', line: 2, hot: ['kp2', 'klass'],
+        desc: '<p>两个对象头里的类型指针<b>指向同一个</b> <code>InstanceKlass</code>。</p><p>一个类只有一个 Klass，所有实例共享。</p>',
+        set: { hdr2: true } },
+      { title: '构造方法：字段各自独立，静态变量共享', line: 2, hot: ['name2', 'age2', 'count', 'p2'],
+        desc: '<p><code>name = "Amy"</code>、<code>age = 20</code> 写在第二个对象里。</p><p><code>count</code> 在 mirror 中，两个对象共享，变成 2。</p>',
+        set: { f2: ['"Amy"', '20'], count: '2', refs: { s2: true } } },
+      { title: 'p2.say()：走同一张 vtable', line: 3, hot: ['kp2', 'vsay'], trail: [['s2', 'kp2', 'klass', 'vsay']],
+        desc: '<p>p2 → OOP → Klass → vtable，和 p 用的是<b>同一张 vtable</b>。</p><p>方法信息只存一份，对象因此更小。</p>' },
+      { title: 'getClass() 返回同一个 mirror', line: [4, 5], hot: ['jm', 'mirror'], trail: [['kp1', 'klass', 'jm', 'mirror'], ['kp2', 'klass', 'jm', 'mirror']], dwell: 4400,
+        desc: '<p>两个对象沿各自的类型指针找到同一个 Klass，再取同一个 <code>_java_mirror</code>。</p><p>所以 <code>p.getClass() == p2.getClass()</code> 为 <b class="ok">true</b>。</p>' },
+    ],
+  };
+
+  let E;
+  function row(g, x, y, w, label, cls) {
+    const rect = svg('rect', { x, y, width: w, height: 24, rx: 4, class: 'box anim ' + (cls || '') }, g);
+    svg('text', { x: x + 8, y: y + 16, class: 'small muted' }, g, label);
+    const val = svg('text', { x: x + w - 8, y: y + 16, 'text-anchor': 'end', class: 'mono small' }, g, '');
+    return { rect, val, cls: cls || '' };
+  }
+  function block(g) { const b = svg('g', { class: 'anim hide' }, g); move(b, 16, 0); return b; }
+
+  Player({
+    scenarios: [sc1, sc2],
+    dwell: 3000,
+    init(g, ctx) {
+      const sc = [sc1, sc2][ctx.scenario];
+      E = { rows: {}, blocks: {} };
+      // 三列
+      [['栈 Stack', 20, 150], ['堆 Heap', 200, 280], ['元空间 Metaspace', 504, 240]].forEach(([n, x, w]) => {
+        svg('rect', { x, y: 32, width: w, height: 444, rx: 10, class: 'col-bg' }, g);
+        svg('text', { x: x + 10, y: 22, class: 'small muted' }, g, n);
+      });
+      // 栈帧
+      svg('rect', { x: 32, y: 70, width: 126, height: 140, rx: 8, class: 'box' }, g);
+      svg('text', { x: 44, y: 92, class: 'small title' }, g, 'main() 栈帧');
+      E.rows.p = row(g, 40, 113, 110, 'p');
+      E.rows.p2 = row(g, 40, 163, 110, sc.slot2);
+      // instanceOop
+      const oop = (top, n) => {
+        const b = E.blocks['oop' + n] = block(g);
+        svg('rect', { x: 212, y: top, width: 256, height: 146, rx: 8, class: 'box' }, b);
+        svg('text', { x: 224, y: top + 20, class: 'small title' }, b, `instanceOop（Person 对象 ${n}）`);
+        E.rows['mw' + n] = row(b, 222, R(top, 0), 236, 'Mark Word');
+        E.rows['kp' + n] = row(b, 222, R(top, 1), 236, 'Klass Pointer');
+        E.rows['name' + n] = row(b, 222, R(top, 2), 236, 'name');
+        E.rows['age' + n] = row(b, 222, R(top, 3), 236, 'age');
+      };
+      oop(OOP1, 1); oop(OOP2, 2);
+      // mirror
+      const m = E.blocks.mirror = block(g);
+      E.rows.mirror = { rect: svg('rect', { x: 212, y: MIR, width: 256, height: 100, rx: 8, class: 'box ok anim' }, m), cls: 'ok' };
+      svg('text', { x: 224, y: MIR + 20, class: 'small title' }, m, 'java.lang.Class（Person 的 mirror）');
+      E.rows.count = row(m, 222, MIR + 32, 236, 'static count');
+      E.rows.mk = row(m, 222, MIR + 62, 236, 'klass（隐藏字段）');
+      E.rows.mk.val.textContent = '→ InstanceKlass';
+      // InstanceKlass
+      E.placeholder = svg('text', { x: 624, y: 240, 'text-anchor': 'middle', class: 'small muted anim' }, g, '（Person 尚未加载）');
+      const k = E.blocks.klass = block(g);
+      E.rows.klass = { rect: svg('rect', { x: 516, y: KL, width: 220, height: 416, rx: 8, class: 'box violet anim' }, k), cls: 'violet' };
+      svg('text', { x: 528, y: KL + 22, class: 'small title' }, k, 'InstanceKlass（Person）');
+      const kr = [['_super', '→ Object'], ['_fields', 'name, age'], ['_methods', '<init>, say'], ['_constants', '常量池']];
+      kr.forEach(([l, v], n) => { const r = row(k, 526, KL + 34 + n * 28, 200, l); r.val.textContent = v; });
+      svg('text', { x: 528, y: 210, class: 'small title' }, k, 'vtable（虚方法表）');
+      const v1 = row(k, 526, 220, 200, 'equals / hashCode …'); v1.val.textContent = '→ Object';
+      E.rows.vsay = row(k, 526, 248, 200, 'say()'); E.rows.vsay.val.textContent = '→ Person.say';
+      const it = row(k, 526, 288, 200, 'itable'); it.val.textContent = '接口方法表';
+      const lh = row(k, 526, 316, 200, '_layout_helper'); lh.val.textContent = '对象大小';
+      const ac = row(k, 526, 344, 200, '_access_flags'); ac.val.textContent = '访问标志';
+      E.rows.jm = row(k, 526, 400, 200, '_java_mirror'); E.rows.jm.val.textContent = '→ Class 对象';
+      E.links = svg('g', {}, g);
+    },
+    render(st, step, i, ctx) {
+      const hot = step.hot || [];
+      const show = (id, on) => { const b = E.blocks[id]; b.classList.toggle('hide', !on); move(b, on ? 0 : 16, 0); };
+      show('klass', st.klass); show('mirror', st.mirror); show('oop1', st.oop1); show('oop2', st.oop2);
+      E.placeholder.classList.toggle('hide', st.klass);
+      for (const n of [1, 2]) {
+        const hdr = st['hdr' + n], f = st['f' + n];
+        E.rows['mw' + n].val.textContent = hdr ? '无锁 · 001' : '—';
+        E.rows['kp' + n].val.textContent = hdr ? '→ InstanceKlass' : '—';
+        E.rows['name' + n].val.textContent = f[0];
+        E.rows['age' + n].val.textContent = f[1];
+      }
+      E.rows.count.val.textContent = st.count;
+      E.rows.p.val.textContent = st.refs.p ? '●' : 'null';
+      E.rows.p2.val.textContent = st.refs.s2 ? '●' : '';
+      for (const id in E.rows) {
+        const r = E.rows[id];
+        r.rect.setAttribute('class', 'box anim ' + (hot.includes(id) ? 'accent' : r.cls));
+      }
+      // 指针箭头：等方框滑入后淡入
+      while (E.links.firstChild) E.links.removeChild(E.links.firstChild);
+      const lg = svg('g', { class: 'anim hide' }, E.links);
+      lg.style.transitionDelay = '450ms';
+      const cls = id => hot.includes(id) ? 'accent' : '';
+      if (st.hdr1) Player.arrow(lg, 458, R(OOP1, 1) + 12, 514, 92, cls('kp1') || 'accent');
+      if (st.hdr2) Player.arrow(lg, 458, R(OOP2, 1) + 12, 514, 112, cls('kp2') || 'accent');
+      if (st.mirror) {
+        Player.arrow(lg, 526, 412, 470, 396, 'ok');
+        Player.arrow(lg, 458, MIR + 74, 514, 446, 'ok');
+      }
+      if (st.refs.p) Player.arrow(lg, 150, 125, 210, R(OOP1, 0) - 8, 'accent');
+      if (st.refs.s2) {
+        if (ctx.scenario === 0) Player.arrow(lg, 150, 175, 210, MIR + 14, 'ok');
+        else Player.arrow(lg, 150, 175, 210, R(OOP2, 0) - 8, 'accent');
+      }
+      requestAnimationFrame(() => requestAnimationFrame(() => lg.classList.remove('hide')));
+      (step.trail || []).forEach((pts, n) => trail(ctx.fx, pts.map(k => A[k]), '', n ? 'violet' : 'accent', n * 400));
+    },
+  });
+})();
+</script>
+</body>
+</html>

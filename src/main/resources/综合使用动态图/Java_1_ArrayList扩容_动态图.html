@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ArrayList 扩容动态图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .code { font-size: 11.5px; }
+  .stage g.garbage:not(.hide) { opacity: .5; }
+  .stage g.garbage .box { stroke-dasharray: 4 3; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Java 基础 · 1 · ArrayList</p>
+    <h1>ArrayList 扩容：懒加载到 10，之后每次 1.5 倍</h1>
+    <p class="lede">ArrayList 底层是 <code>Object[] elementData</code>。无参构造时并不分配数组，第一次 <code>add</code> 才扩到 10；装满后按 <code>old + (old &gt;&gt; 1)</code> 扩容，用 <code>Arrays.copyOf</code> 建新数组并把旧元素整体复制过去。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>elementData 数组</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--ok)"></i>已存放元素</span>
+            <span><i class="sw" style="background:var(--accent)"></i>本步写入</span>
+            <span><i class="sw" style="background:var(--warn)"></i>容量不足</span>
+            <span><i class="sw" style="background:var(--bad)"></i>旧数组，等待 GC</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 400" role="img" aria-label="ArrayList 的 elementData 数组从空数组到 10，再扩容到 15 并复制元素的过程"></svg>
+        <p class="cap">格子里的 <code>null</code> 表示已分配但还没存元素的位置；<code>size</code> 是元素个数，<code>elementData.length</code> 是容量。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel"><div class="panel-h"><h2>代码</h2></div><pre class="code" id="code"></pre></section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <ul>
+      <li>底层是 <code>Object[] elementData</code>；<code>size</code> 是元素个数，<code>elementData.length</code> 是容量。</li>
+      <li><code>new ArrayList()</code> 指向共享空数组 <code>DEFAULTCAPACITY_EMPTY_ELEMENTDATA</code>（JDK8+ 懒加载），第一次 <code>add</code> 才扩到默认容量 10；<code>new ArrayList(n)</code> 直接分配 n。</li>
+      <li>扩容：<code>newCapacity = oldCapacity + (oldCapacity &gt;&gt; 1)</code>，约 1.5 倍；1.5 倍仍不够就直接用所需最小容量；超过 <code>MAX_ARRAY_SIZE</code>（<code>Integer.MAX_VALUE - 8</code>）走 <code>hugeCapacity</code>。</li>
+      <li>扩容方式：<code>Arrays.copyOf</code> 新建数组并整体复制（<code>System.arraycopy</code>），是 O(n) 操作，所以能预估数据量时应指定初始容量。</li>
+      <li>对比：<code>Vector</code> 默认 10、扩容 2 倍；ArrayList 非线程安全。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, move } = Player;
+  const ROWY = { main: 140, below: 250, garbage: 140, gone: 140 };
+  const SRC = { x: 676, y: 52 };
+  const cellW = cap => Math.min(40, Math.floor(660 / cap));
+  const center = (a, k) => ({ x: 50 + k * cellW(a.cap) + cellW(a.cap) / 2, y: ROWY[a.pos] + 18 });
+  const L = s => s.split('');
+  const AJ = L('ABCDEFGHIJ');
+
+  // 一个延迟出发、到达后淡出的小包裹
+  function fly(fx, from, to, label, cls, delay) {
+    const g = svg('g', { class: 'anim hide' }, fx);
+    move(g, from.x, from.y);
+    svg('circle', { r: 6, class: 'dot ' + (cls || '') }, g);
+    if (label) svg('text', { x: 8, y: -8, class: 'mono small c-' + (cls || 'accent') }, g, label);
+    g.style.transitionDelay = delay + 'ms';
+    g.getBoundingClientRect();
+    requestAnimationFrame(() => requestAnimationFrame(() => { g.classList.remove('hide'); move(g, to.x, to.y); }));
+    setTimeout(() => { g.style.transitionDelay = '0ms'; g.classList.add('hide'); }, delay + 850);
+  }
+
+  const range = (a, b) => Array.from({ length: b - a }, (_, k) => a + k);
+
+  const SRC1 = ['List<String> list = new ArrayList<>();', 'list.add(e);'];
+  const JDK_ADD = [
+    '// ↓ JDK 8 源码（简化）',
+    'add(e):',
+    '  ensureCapacityInternal(size + 1);',
+    '  elementData[size++] = e;',
+    'calculateCapacity(minCap):',
+    '  if (elementData == 默认空数组)',
+    '    return Math.max(10, minCap);',
+    '  return minCap;',
+  ];
+  const JDK_GROW = [
+    'grow(minCap):',
+    '  int old = elementData.length;',
+    '  int nc = old + (old >> 1);',
+    '  if (nc - minCap < 0) nc = minCap;',
+    '  elementData =',
+    '    Arrays.copyOf(elementData, nc);',
+  ];
+
+  const scenarios = [
+    {
+      label: '默认构造：0 → 10 → 15',
+      code: [...SRC1, ...JDK_ADD, ...JDK_GROW],
+      state: { size: 0, ref: 'empty', e: '', arrays: {}, f: ['new ArrayList<>() 不分配数组', 'elementData = DEFAULTCAPACITY_EMPTY_ELEMENTDATA（长度 0，所有实例共享）'], fc: '' },
+      steps: [
+        { title: '构造：指向共享空数组', line: 1,
+          desc: '<p><code>new ArrayList&lt;&gt;()</code> 只把 <code>elementData</code> 指向一个共享的空数组 <code>DEFAULTCAPACITY_EMPTY_ELEMENTDATA</code>。</p><p>此时容量是 <b>0</b>，不是 10。这就是 JDK8 的<b>懒加载</b>。</p>' },
+        { title: '第一次 add：容量算成 10', line: [2, 4, 5, 7, 8, 9], hotEmpty: true,
+          desc: '<p><code>minCapacity = size + 1 = 1</code>。</p><p>发现 <code>elementData</code> 还是默认空数组，于是取 <code>max(10, 1) = 10</code>，调用 <code>grow(10)</code>。</p>',
+          set: { e: '"A"', f: ['minCapacity = size + 1 = 1', '还是默认空数组 → max(10, 1) = 10 → grow(10)'] } },
+        { title: '分配 Object[10]', line: [11, 12, 13, 14, 15, 16],
+          desc: '<p><code>old = 0</code>，<code>0 + (0 &gt;&gt; 1) = 0</code> 小于 10，所以 <code>nc = minCap = 10</code>。</p><p class="ok">这时才真正分配 10 个格子。</p>',
+          set: { ref: 'a', arrays: { a: { cap: 10, items: [], pos: 'main' } }, f: ['old = 0，nc = 0 + (0 >> 1) = 0 < 10 → nc = 10', 'elementData = Arrays.copyOf({}, 10)：真正分配 10 个格子'], fc: 'c-ok' } },
+        { title: 'A 放进 [0]，size = 1', line: 6, puts: [['a', 0, 'A']],
+          desc: '<p><code>elementData[size++] = e</code>：放进下标 0，<code>size</code> 变成 1。</p>',
+          set: { size: 1, arrays: { a: { items: ['A'] } }, f: ['elementData[0] = "A"，size = 1', '容量 10 还剩 9 个空位'], fc: '' } },
+        { title: '继续 add B ~ J，直到装满', line: [2, 6], puts: range(1, 10).map(k => ['a', k, AJ[k]]), dwell: 3400,
+          desc: '<p>每次 <code>add</code> 都先检查 <code>size + 1 ≤ length</code>，够就直接放。</p><p>放完 J 后 <code>size = 10 = length</code>，数组满了。</p>',
+          set: { size: 10, e: '"B" ~ "J"', arrays: { a: { items: AJ } }, f: ['每次 add 都检查 size + 1 ≤ elementData.length', '放完 J：size = 10 = length，数组已满'] } },
+        { title: 'add K：容量不够，触发 grow', line: [2, 4, 5], hot: { a: 'warn' },
+          desc: '<p>第 11 个元素：<code>minCapacity = 11 &gt; length = 10</code>。</p><p class="warn">放不下，调用 <code>grow(11)</code>。</p>',
+          set: { e: '"K"', f: ['minCapacity = size + 1 = 11 > elementData.length = 10', '→ grow(11)'], fc: 'c-warn' } },
+        { title: '新容量 = 10 + (10 >> 1) = 15', line: [12, 13, 14],
+          desc: '<p><code>10 &gt;&gt; 1 = 5</code>（右移一位就是除以 2 向下取整）。</p><p><code>nc = 10 + 5 = 15</code>，即 <b>1.5 倍</b>；15 ≥ 11，不用改成 minCapacity。</p>',
+          set: { arrays: { a: { note: '旧数组' }, b: { cap: 15, items: [], pos: 'below', note: '新数组' } }, f: ['old = 10，old >> 1 = 5', 'nc = 10 + 5 = 15（1.5 倍）；15 ≥ 11，保持 15'], fc: 'c-accent' } },
+        { title: 'Arrays.copyOf：逐个复制', line: [15, 16], copy: ['a', 'b', 10], dwell: 3600,
+          desc: '<p><code>Arrays.copyOf</code> 内部调用 <code>System.arraycopy</code>，把旧数组的 10 个元素复制到新数组的相同下标。</p><p class="warn">复制是 O(n)：元素越多，扩容越贵。</p>',
+          set: { arrays: { b: { items: AJ } }, f: ['Arrays.copyOf(elementData, 15) → System.arraycopy', '旧数组 10 个元素复制到新数组 [0] ~ [9]：O(n)'], fc: 'c-warn' } },
+        { title: 'elementData 指向新数组', line: 15,
+          desc: '<p><code>elementData</code> 改为指向新数组。</p><p>旧数组不再被引用，<b class="bad">等待 GC 回收</b>。</p>',
+          set: { ref: 'b', arrays: { a: { pos: 'garbage', note: '旧数组：无引用，等待 GC' } }, f: ['elementData = 新数组（length 15）', '旧的 Object[10] 没有引用了，下次 GC 时回收'], fc: '' } },
+        { title: 'K 放进 [10]，size = 11', line: 6, puts: [['b', 10, 'K']],
+          desc: '<p>扩容完成后才执行 <code>elementData[size++] = e</code>，K 放进下标 10。</p><p>还剩 4 个空位。</p>',
+          set: { size: 11, arrays: { a: { pos: 'gone' }, b: { pos: 'main', note: '', items: [...AJ, 'K'] } }, f: ['elementData[10] = "K"，size = 11', '容量 15，还剩 4 个空位'], fc: 'c-ok' } },
+        { title: '之后的扩容序列', dwell: 3600,
+          desc: '<p>再装满 15 个后会扩到 <code>15 + 7 = 22</code>，然后 33、49、73……</p><p>每次扩容都是一次<b>新建数组 + 整体复制</b>。</p><p>对比：<code>Vector</code> 扩容 2 倍。</p>',
+          set: { e: '', f: ['容量序列：0 → 10 → 15 → 22 → 33 → 49 → 73 → …', '每一次扩容 = 新建数组 + 复制全部旧元素'], fc: 'c-accent' } },
+      ],
+    },
+    {
+      label: '指定容量：new ArrayList<>(11)',
+      code: ['List<String> list =', '    new ArrayList<>(11);', 'for (...) list.add(e); // 11 个', 'list.add("L");         // 第 12 个',
+        '// ↓ JDK 8 源码（简化）', 'ArrayList(int initialCapacity):', '  if (initialCapacity > 0)', '    elementData =', '      new Object[initialCapacity];',
+        '  else if (initialCapacity == 0)', '    elementData = EMPTY_ELEMENTDATA;', ...JDK_GROW],
+      state: { size: 0, ref: 'empty', e: '', arrays: {}, f: [], fc: '' },
+      steps: [
+        { title: '构造时直接分配 11 个格子', line: [1, 2, 6, 7, 8, 9],
+          desc: '<p><code>initialCapacity = 11 &gt; 0</code>，构造方法里直接 <code>new Object[11]</code>。</p><p>不走懒加载，也不会被改成 10。</p>',
+          set: { ref: 'a', arrays: { a: { cap: 11, items: [], pos: 'main' } }, f: ['initialCapacity = 11 > 0 → elementData = new Object[11]', '有参构造：立即分配，容量就是 11'], fc: 'c-ok' } },
+        { title: 'add A：容量够，直接放', line: 3, puts: [['a', 0, 'A']],
+          desc: '<p><code>minCapacity = 1 ≤ 11</code>，不扩容。</p><p>只有默认空数组才会被抬到 10，这里不是。</p>',
+          set: { size: 1, e: '"A"', arrays: { a: { items: ['A'] } }, f: ['minCapacity = 1 ≤ 11，不扩容', 'elementData[0] = "A"，size = 1'], fc: '' } },
+        { title: 'add B ~ K：一次扩容都没有', line: 3, puts: range(1, 11).map(k => ['a', k, L('ABCDEFGHIJK')[k]]), dwell: 3400,
+          desc: '<p>11 个元素全部放下，<b class="ok">复制次数 = 0</b>。</p><p>对比默认构造：放第 11 个元素时要扩容到 15，并复制 10 个元素。</p>',
+          set: { size: 11, e: '"B" ~ "K"', arrays: { a: { items: L('ABCDEFGHIJK') } }, f: ['11 个元素全部放下：扩容 0 次，复制 0 个元素', '默认构造放 11 个：扩容 1 次，复制 10 个'], fc: 'c-ok' } },
+        { title: 'add L：满了才扩容', line: [4, 12], hot: { a: 'warn' },
+          desc: '<p>第 12 个元素：<code>minCapacity = 12 &gt; 11</code>，调用 <code>grow(12)</code>。</p>',
+          set: { e: '"L"', f: ['minCapacity = 12 > elementData.length = 11', '→ grow(12)'], fc: 'c-warn' } },
+        { title: '新容量 = 11 + (11 >> 1) = 16', line: [13, 14, 15],
+          desc: '<p><code>11 &gt;&gt; 1 = 5</code>（向下取整），<code>nc = 16</code>。</p><p>所以"1.5 倍"是近似值：容量是奇数时略小于 1.5 倍。</p>',
+          set: { arrays: { a: { note: '旧数组' }, b: { cap: 16, items: [], pos: 'below', note: '新数组' } }, f: ['old = 11，old >> 1 = 5（向下取整）', 'nc = 11 + 5 = 16 ≥ 12，保持 16'], fc: 'c-accent' } },
+        { title: '复制 11 个元素', line: [16, 17], copy: ['a', 'b', 11], dwell: 3600,
+          desc: '<p><code>Arrays.copyOf</code> 把 11 个元素复制到新数组。</p>',
+          set: { arrays: { b: { items: L('ABCDEFGHIJK') } }, f: ['Arrays.copyOf(elementData, 16)', '复制 11 个元素：O(n)'], fc: 'c-warn' } },
+        { title: '指向新数组，放入 L', line: [16, 17], puts: [['b', 11, 'L']],
+          desc: '<p><code>elementData</code> 指向新数组，旧数组等待 GC。</p><p>L 放进下标 11，<code>size = 12</code>。</p>',
+          set: { size: 12, ref: 'b', arrays: { a: { pos: 'gone' }, b: { pos: 'main', note: '', items: L('ABCDEFGHIJKL') } }, f: ['elementData = 新数组（length 16），旧数组等待 GC', 'elementData[11] = "L"，size = 12'], fc: 'c-ok' } },
+        { title: '小结：能预估就指定容量', line: [10, 11], dwell: 3600,
+          desc: '<p>能预估数据量时指定初始容量，可以避免多次扩容和复制。</p><p><code>new ArrayList&lt;&gt;(0)</code> 用的是另一个空数组 <code>EMPTY_ELEMENTDATA</code>：首次 <code>add</code> 只扩到 <b>1</b>，不是 10。</p>',
+          set: { e: '', f: ['预估数据量 → 指定初始容量 → 减少扩容和复制', 'new ArrayList<>(0)：EMPTY_ELEMENTDATA，首次 add 扩到 1'], fc: 'c-accent' } },
+      ],
+    },
+    {
+      label: 'addAll：1.5 倍仍不够',
+      code: ['List<String> list = new ArrayList<>();', '// 已 add 10 个元素：A ~ J', 'list.addAll(eight);  // 8 个元素',
+        '// ↓ JDK 8 源码（简化）', 'addAll(c):', '  Object[] a = c.toArray();', '  ensureCapacityInternal(', '      size + a.length);',
+        '  System.arraycopy(a, 0, elementData,', '      size, a.length);', '  size += a.length;', ...JDK_GROW],
+      state: { size: 10, ref: 'a', e: '', arrays: { a: { cap: 10, items: AJ, pos: 'main' } }, f: ['list 里已有 10 个元素，容量 10，已满', ''], fc: '' },
+      steps: [
+        { title: '初始：10 个元素，已满', line: [1, 2],
+          desc: '<p>默认构造后放了 10 个元素，<code>size = length = 10</code>。</p>' },
+        { title: 'addAll 8 个：minCapacity = 18', line: [3, 6, 7, 8], hot: { a: 'warn' },
+          desc: '<p>一次要加 8 个，<code>minCapacity = size + a.length = 10 + 8 = 18</code>。</p><p class="warn">18 &gt; 10，调用 <code>grow(18)</code>。</p>',
+          set: { e: 'K ~ R（8 个）', f: ['minCapacity = size + a.length = 10 + 8 = 18', '18 > length 10 → grow(18)'], fc: 'c-warn' } },
+        { title: '先按 1.5 倍算：15', line: [13, 14], hot: { a: 'warn' },
+          desc: '<p><code>nc = 10 + (10 &gt;&gt; 1) = 15</code>。</p><p class="bad">15 &lt; 18，1.5 倍也放不下。</p>',
+          set: { f: ['nc = 10 + (10 >> 1) = 15', '15 < minCapacity 18：1.5 倍仍不够'], fc: 'c-bad' } },
+        { title: '直接用 minCapacity = 18', line: 15,
+          desc: '<p><code>nc - minCap &lt; 0</code>，于是 <code>nc = minCap = 18</code>。</p><p>若超过 <code>MAX_ARRAY_SIZE</code>（<code>Integer.MAX_VALUE - 8</code>）会走 <code>hugeCapacity</code>。</p>',
+          set: { arrays: { a: { note: '旧数组' }, b: { cap: 18, items: [], pos: 'below', note: '新数组' } }, f: ['nc - minCap < 0 → nc = minCap = 18', '超过 MAX_ARRAY_SIZE 时走 hugeCapacity'], fc: 'c-accent' } },
+        { title: '复制旧的 10 个元素', line: [16, 17], copy: ['a', 'b', 10], dwell: 3600,
+          desc: '<p><code>Arrays.copyOf(elementData, 18)</code>：旧元素复制到新数组 [0] ~ [9]。</p>',
+          set: { arrays: { b: { items: AJ } }, f: ['Arrays.copyOf(elementData, 18)', '复制 10 个旧元素'], fc: 'c-warn' } },
+        { title: 'elementData 指向新数组', line: 16,
+          desc: '<p>旧数组没有引用了，<b class="bad">等待 GC</b>。</p>',
+          set: { ref: 'b', arrays: { a: { pos: 'garbage', note: '旧数组：无引用，等待 GC' } }, f: ['elementData = 新数组（length 18）', ''], fc: '' } },
+        { title: 'arraycopy 追加 8 个元素', line: [9, 10, 11], puts: range(10, 18).map(k => ['b', k, L('ABCDEFGHIJKLMNOPQR')[k]]), dwell: 3400,
+          desc: '<p><code>System.arraycopy(a, 0, elementData, size, 8)</code>：新元素一次复制到 [10] ~ [17]。</p><p><code>size = 18</code>，正好装满。</p>',
+          set: { size: 18, arrays: { a: { pos: 'gone' }, b: { pos: 'main', note: '', items: L('ABCDEFGHIJKLMNOPQR') } }, f: ['System.arraycopy → elementData[10] ~ [17]', 'size = 18 = length'], fc: 'c-ok' } },
+        { title: '小结：取两者的较大值', dwell: 3600,
+          desc: '<p>新容量 = <code>max(old + (old &gt;&gt; 1), minCapacity)</code>。</p><p>批量添加前也可以先调用 <code>ensureCapacity(n)</code>，一次扩到位。</p>',
+          set: { e: '', f: ['新容量 = max(old + (old >> 1), minCapacity)', '批量添加前可调用 ensureCapacity(n) 一次扩到位'], fc: 'c-accent' } },
+      ],
+    },
+  ];
+
+  let E;
+  function getRow(g, id, a) {
+    if (E.rows[id]) return E.rows[id];
+    const r = { g: svg('g', { class: 'hide' }, E.arr), cells: [] };
+    move(r.g, 0, ROWY[a.pos]);
+    r.label = svg('text', { x: 50, y: -10, class: 'mono small' }, r.g, '');
+    const w = cellW(a.cap);
+    for (let k = 0; k < a.cap; k++) {
+      const x = 50 + k * w;
+      const rect = svg('rect', { x: x + 1, y: 0, width: w - 2, height: 36, rx: 4, class: 'box anim' }, r.g);
+      const t = svg('text', { x: x + w / 2, y: 23, 'text-anchor': 'middle', class: 'mono anim' }, r.g, '');
+      svg('text', { x: x + w / 2, y: 52, 'text-anchor': 'middle', class: 'small muted' }, r.g, k);
+      r.cells.push({ rect, t });
+    }
+    r.g.getBoundingClientRect();
+    r.g.classList.add('anim');
+    E.rows[id] = r;
+    return r;
+  }
+
+  Player({
+    scenarios,
+    dwell: 2800,
+    init(g) {
+      E = { rows: {} };
+      // ArrayList 对象
+      svg('rect', { x: 20, y: 14, width: 250, height: 74, rx: 8, class: 'box soft' }, g);
+      svg('text', { x: 34, y: 36, class: 'title' }, g, 'ArrayList list');
+      E.size = svg('text', { x: 34, y: 58, class: 'mono' }, g, '');
+      E.len = svg('text', { x: 34, y: 78, class: 'mono' }, g, '');
+      // 共享空数组
+      E.empty = svg('g', { class: 'anim' }, g);
+      E.emptyBox = svg('rect', { x: 300, y: 22, width: 300, height: 58, rx: 8, class: 'box dashed anim' }, E.empty);
+      svg('text', { x: 314, y: 44, class: 'mono small' }, E.empty, 'DEFAULTCAPACITY_EMPTY_ELEMENTDATA');
+      svg('text', { x: 314, y: 66, class: 'small muted' }, E.empty, '共享空数组 {}，length = 0');
+      svg('line', { x1: 270, y1: 51, x2: 296, y2: 51, class: 'wire accent' }, E.empty);
+      svg('path', { d: 'M296,47 L300,51 L296,55 z', style: 'fill: var(--accent)' }, E.empty);
+      // add(e) 的输入
+      svg('rect', { x: 620, y: 14, width: 120, height: 74, rx: 8, class: 'box' }, g);
+      svg('text', { x: 680, y: 34, 'text-anchor': 'middle', class: 'small muted' }, g, '待添加 e');
+      E.e = svg('text', { x: 680, y: 62, 'text-anchor': 'middle', class: 'mono c-accent' }, g, '');
+      // 引用箭头层 + 数组层
+      E.ref = svg('g', {}, g);
+      E.arr = svg('g', {}, g);
+      // 公式区
+      E.fbox = svg('rect', { x: 20, y: 320, width: 720, height: 66, rx: 8, class: 'box soft anim' }, g);
+      E.f1 = svg('text', { x: 36, y: 346, class: 'mono' }, g, '');
+      E.f2 = svg('text', { x: 36, y: 372, class: 'small' }, g, '');
+    },
+    render(st, step, i, ctx) {
+      E.size.textContent = `size = ${st.size}`;
+      const cur = st.ref === 'empty' ? null : st.arrays[st.ref];
+      E.len.textContent = `elementData.length = ${cur ? cur.cap : 0}`;
+      E.empty.classList.toggle('hide', st.ref !== 'empty');
+      E.emptyBox.setAttribute('class', 'box dashed anim ' + (step.hotEmpty ? 'accent' : ''));
+      E.e.textContent = st.e;
+      E.f1.textContent = st.f[0] || '';
+      E.f2.textContent = st.f[1] || '';
+      E.f1.setAttribute('class', 'mono ' + (st.fc || ''));
+
+      // 引用箭头
+      while (E.ref.firstChild) E.ref.removeChild(E.ref.firstChild);
+      if (cur) {
+        const y = ROWY[cur.pos] + 18;
+        svg('path', { d: `M34,88 V${y} H40`, class: 'wire accent' + (step.set && step.set.ref ? ' flow' : '') }, E.ref);
+        Player.arrow(E.ref, 38, y, 49, y, 'accent');
+        svg('text', { x: 40, y: 104, class: 'small c-accent' }, E.ref, 'elementData');
+      }
+
+      // 数组
+      for (const id in E.rows) if (!st.arrays[id]) E.rows[id].g.classList.add('hide');
+      for (const id in st.arrays) {
+        const a = st.arrays[id];
+        const r = getRow(ctx.layer, id, a);
+        move(r.g, 0, ROWY[a.pos]);
+        r.g.classList.toggle('hide', a.pos === 'gone');
+        r.g.classList.toggle('garbage', a.pos === 'garbage');
+        r.label.textContent = `Object[${a.cap}]` + (a.note ? '  ' + a.note : '');
+        r.label.setAttribute('class', 'mono small ' + (a.pos === 'garbage' ? 'c-bad' : a.pos === 'below' ? 'c-accent' : ''));
+        const hot = (step.hot || {})[id];
+        r.cells.forEach((c, k) => {
+          const v = a.items[k];
+          let cls = v ? 'ok' : '';
+          if (a.pos === 'garbage') cls = 'bad';
+          else if (hot) cls = hot;
+          c.rect.setAttribute('class', 'box anim ' + cls);
+          c.t.textContent = v || 'null';
+          c.t.setAttribute('class', 'mono anim' + (v ? '' : ' small muted'));
+          c.rect.style.transitionDelay = c.t.style.transitionDelay = '';
+        });
+      }
+
+      // 复制：旧数组逐个飞到新数组
+      if (step.copy) {
+        const [from, to, n] = step.copy;
+        const A = st.arrays[from], B = st.arrays[to], rb = E.rows[to];
+        for (let k = 0; k < n; k++) {
+          const d = 150 + k * 110;
+          fly(ctx.fx, center(A, k), center(B, k), A.items[k], 'warn', d);
+          const c = rb.cells[k];
+          c.t.classList.add('hide');
+          c.rect.setAttribute('class', 'box anim');
+          c.t.style.transitionDelay = c.rect.style.transitionDelay = (d + 600) + 'ms';
+          requestAnimationFrame(() => requestAnimationFrame(() => { c.t.classList.remove('hide'); c.rect.setAttribute('class', 'box anim ok'); }));
+        }
+      }
+      // 放入：从 e 飞到格子
+      (step.puts || []).forEach(([id, k, label], n) => {
+        const a = st.arrays[id], c = E.rows[id].cells[k], d = 100 + n * 160;
+        fly(ctx.fx, SRC, center(a, k), label, 'accent', d);
+        c.t.classList.add('hide');
+        c.rect.setAttribute('class', 'box anim');
+        c.t.style.transitionDelay = c.rect.style.transitionDelay = (d + 600) + 'ms';
+        requestAnimationFrame(() => requestAnimationFrame(() => { c.t.classList.remove('hide'); c.rect.setAttribute('class', 'box anim accent'); }));
+      });
+    },
+  });
+})();
+</script>
+</body>
+</html>

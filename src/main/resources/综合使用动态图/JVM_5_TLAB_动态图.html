@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TLAB 动态图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .stage .ptr { transition: transform .7s cubic-bezier(.4, 0, .2, 1), opacity .45s ease; }
+  .stage .ptr path { stroke: none; }
+  .stage .ptr.accent path { fill: var(--accent); } .stage .ptr.violet path { fill: var(--violet); }
+  .stage .ptr.ok path { fill: var(--ok); } .stage .ptr.bad path { fill: var(--bad); }
+  .stage .seg { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+  .stage .seg.retired { fill: var(--bg); stroke: var(--muted); stroke-dasharray: 4 3; }
+  .stage .bracket { fill: none; stroke: var(--muted); stroke-width: 1.2; }
+  .stage .eden { fill: var(--surface); stroke: var(--ink); stroke-width: 1.4; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">JVM · 5 · TLAB</p>
+    <h1>TLAB：每个线程在 Eden 里有自己的一小块</h1>
+    <p class="lede">堆是线程共享的，多个线程同时在 Eden 中分配对象需要同步（CAS + 失败重试）。TLAB（Thread Local Allocation Buffer）让 JVM 为每个线程预先划出一小块私有区域，线程优先在里面分配，只需要移动自己的指针，不用加锁。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>Eden 区与线程的分配指针</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--accent)"></i>TLAB（线程私有分配区）</span>
+            <span><i class="sw" style="background:var(--ok)"></i>TLAB 内分配的对象</span>
+            <span><i class="sw" style="background:var(--violet)"></i>共享 Eden 中 CAS 分配</span>
+            <span><i class="sw" style="background:var(--bad)"></i>CAS 失败 / 浪费</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 400" role="img" aria-label="三个线程在 Eden 中分配对象：有 TLAB 时各自移动自己的指针，没有 TLAB 时竞争 CAS 共享指针"></svg>
+        <p class="cap">宽度只是示意，不按比例。真实的 TLAB 默认约为 Eden 的 1%，并按线程的分配速度自适应调整。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <ul>
+      <li><b>问题</b>：堆是线程共享的，多线程同时在 Eden 中分配对象要同步（CAS + 失败重试），并发高时竞争激烈。</li>
+      <li><b>方案</b>：JVM 在 Eden 中为每个线程预先划分一小块私有区域（TLAB），线程优先在自己的 TLAB 中分配，只需要移动指针（指针碰撞），不需要加锁。</li>
+      <li><b>TLAB 用完时</b>：剩余空间小于最大浪费阈值 <code>refill_waste</code> → 废弃当前 TLAB，用 CAS 从 Eden 申请一块新的；否则（剩余空间还很多）这个对象直接在 Eden 共享区用 CAS 分配，保留当前 TLAB。</li>
+      <li><b>注意</b>：TLAB 只是<b>分配时</b>私有，分配出来的对象依然是所有线程都可以访问的。</li>
+      <li><b>参数</b>：<code>-XX:+UseTLAB</code>（默认开启），默认大小约为 Eden 的 1%，会根据线程的分配情况自适应调整。</li>
+      <li><b>对象分配顺序</b>：栈上分配（逃逸分析 + 标量替换）→ TLAB → Eden 共享区 →（大对象）老年代。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet } = Player;
+  const BX = 40, BW = 680, BY = 170, BH = 56;          // Eden 条
+  const X = u => BX + u * BW / 100;                    // 单位 → x 坐标 (Eden 共 100 个单位)
+  const TX = { T1: 150, T2: 380, T3: 610 };            // 线程框中心
+  const seg = (owner, a, b, top, cls) => ({ id: owner + '@' + a, owner, a, b, top, cls: cls || '' });
+  const obj = (id, a, b, label, cls) => ({ id, a, b, label: label === undefined ? id : label, cls: cls || 'ok' });
+  const T = (t, c) => ({ t, c: c || '' });
+
+  // ---------- 场景 1: 有 TLAB ----------
+  const s1segs = (t1, t2, t3) => [seg('T1', 0, 20, t1), seg('T2', 20, 40, t2), seg('T3', 40, 60, t3)];
+  const S1 = {
+    label: '有 TLAB：各自碰撞指针',
+    threads: ['T1', 'T2', 'T3'],
+    state: { segs: [], objs: [], top: 0, th: {}, log: [], ghost: null },
+    steps: [
+      { title: 'Eden 初始为空', desc: '<p>Eden 是一整块连续内存，<code>Eden top</code> 指向下一个空闲位置。</p><p>三个线程都要在 Eden 中创建对象。</p>',
+        set: { log: [['UseTLAB 默认开启'], ['Eden top = 0']] } },
+      { title: '各线程先用 CAS 领一块 TLAB', desc: '<p>线程第一次分配时，用 <b>CAS</b> 推进共享的 <code>Eden top</code>，一次领走一整块作为自己的 TLAB。</p><p>只有<b>领 TLAB</b>这一下需要同步，之后在 TLAB 里分配都不需要。</p>',
+        set: { segs: s1segs(0, 20, 40), top: 60, th: { T1: T('领到 TLAB [0, 20)', 'c-accent'), T2: T('领到 TLAB [20, 40)', 'c-accent'), T3: T('领到 TLAB [40, 60)', 'c-accent') }, log: [['CAS(Eden top: 0 → 60) 三次，每个线程一次'], ['每块 TLAB 有自己的 top 和 end']] },
+        moves: [['T1', 10, 'CAS', 'warn'], ['T2', 30, 'CAS', 'warn'], ['T3', 50, 'CAS', 'warn']] },
+      { title: 'T1 new Order()：移动自己的 top', desc: '<p>对象放在 <code>T1.top</code> 处，然后 <code>T1.top += size</code>。</p><p class="ok">这就是<b>指针碰撞</b>：一次加法，没有锁、没有 CAS。</p>',
+        set: { segs: s1segs(4, 20, 40), objs: [obj('o1', 0, 4)], th: { T1: T('top: 0 → 4', 'c-ok'), T2: T(''), T3: T('') }, log: [['T1: obj = top; top += 4;  // 不加锁'], ['只有 T1 会改 T1.top，没有竞争']] },
+        moves: [['T1', 2, 'o1', 'ok']] },
+      { title: 'T2、T3 同时分配，互不干扰', desc: '<p>T2、T3 各自在自己的 TLAB 中碰撞指针，<b>同时进行也不会冲突</b>，因为它们修改的是不同的指针。</p>',
+        set: { segs: s1segs(4, 25, 43), objs: [obj('o1', 0, 4), obj('o2', 20, 25), obj('o3', 40, 43)], th: { T1: T(''), T2: T('top: 20 → 25', 'c-ok'), T3: T('top: 40 → 43', 'c-ok') }, log: [['T2、T3 并行分配：0 次 CAS，0 次重试']] },
+        moves: [['T2', 22.5, 'o2', 'ok'], ['T3', 41.5, 'o3', 'ok']] },
+      { title: '继续分配：只是指针往后挪', desc: '<p>T1、T2 再创建对象，仍然只在自己的 TLAB 里往后挪 <code>top</code>。</p>',
+        set: { segs: s1segs(7, 28, 43), objs: [obj('o1', 0, 4), obj('o2', 20, 25), obj('o3', 40, 43), obj('o4', 4, 7), obj('o5', 25, 28)], th: { T1: T('top: 4 → 7', 'c-ok'), T2: T('top: 25 → 28', 'c-ok'), T3: T('') }, log: [['共享的 Eden top 一直停在 60，没人去抢']] },
+        moves: [['T1', 5.5, 'o4', 'ok'], ['T2', 26.5, 'o5', 'ok']] },
+      { title: '对象依然是共享的', desc: '<p>T3 照样可以读 T1 分配的 <code>o1</code>。</p><p class="warn">TLAB 只是<b>分配时</b>私有，分配出来的对象和普通对象一样，所有线程都能访问。</p>',
+        set: { th: { T1: T(''), T2: T(''), T3: T('读取 o1', 'c-violet') }, log: [['TLAB 私有的是“分配权”，不是对象本身']] },
+        moves: [[2, 'T3', '读 o1', 'violet']] },
+      { title: '小结', desc: '<p>有了 TLAB，绝大多数分配都是线程内的一次指针加法；只有领新 TLAB 时才和其他线程竞争。</p>', dwell: 3400,
+        set: { th: { T3: T('') }, log: [['分配快路径：TLAB 内指针碰撞'], ['慢路径：领新 TLAB（CAS）或直接在 Eden 共享区 CAS']] } },
+    ],
+  };
+
+  // ---------- 场景 2: 没有 TLAB ----------
+  const base2 = [obj('旧', 0, 10, '已有对象', 'ok')];
+  const S2 = {
+    label: '没有 TLAB：CAS 竞争共享指针',
+    threads: ['T1', 'T2', 'T3'],
+    state: { segs: [], objs: base2, top: 10, th: {}, log: [], ghost: null },
+    steps: [
+      { title: '关闭 TLAB：大家共用一个 top', desc: '<p>假设 <code>-XX:-UseTLAB</code>。所有线程都在 Eden 共享区分配，只有一个 <code>Eden top</code>。</p><p>Eden 中已经有一些对象，<code>top = 10</code>。</p>',
+        set: { log: [['-XX:-UseTLAB'], ['共享 Eden top = 10']] } },
+      { title: '三个线程同时读到 top = 10', desc: '<p>T1 要 4 个单位，T2 要 3 个，T3 要 5 个。它们同时读取 <code>top</code>，都读到 <b>10</b>。</p>',
+        set: { th: { T1: T('读 top=10，想改成 14', 'c-warn'), T2: T('读 top=10，想改成 13', 'c-warn'), T3: T('读 top=10，想改成 15', 'c-warn') }, log: [['分配 = CAS(top, 旧值, 旧值 + size)']] },
+        moves: [['top', 'T1', '10', 'warn'], ['top', 'T2', '10', 'warn'], ['top', 'T3', '10', 'warn']] },
+      { title: 'CAS：只有 T1 成功', desc: '<p>三个 CAS 同时比较 <code>top == 10</code>，只有一个能成功。</p><p><span class="ok">T1 成功</span>：<code>top</code> 变成 14，对象放在 [10, 14)。</p><p class="bad">T2、T3 失败：top 已经不是 10 了。</p>',
+        set: { objs: [...base2, obj('o1', 10, 14)], top: 14, th: { T1: T('CAS 成功 ✓', 'c-ok'), T2: T('CAS 失败 ✗', 'c-bad'), T3: T('CAS 失败 ✗', 'c-bad') }, log: [['T1: CAS(10 → 14) 成功'], ['T2: CAS(10 → 13) 失败，重试', 'c-bad'], ['T3: CAS(10 → 15) 失败，重试', 'c-bad']] },
+        moves: [['T1', 'top', 'CAS', 'ok'], ['T2', 'top', 'CAS', 'bad'], ['T3', 'top', 'CAS', 'bad']] },
+      { title: 'T2、T3 重读 top = 14，再次 CAS', desc: '<p>失败的线程重新读 <code>top</code>，再试一次。这次 <span class="ok">T2 成功</span>，<span class="bad">T3 又失败</span>。</p>',
+        set: { objs: [...base2, obj('o1', 10, 14), obj('o2', 14, 17)], top: 17, th: { T1: T(''), T2: T('重试 CAS 成功 ✓', 'c-ok'), T3: T('又失败 ✗', 'c-bad') }, log: [['T2: CAS(14 → 17) 成功'], ['T3: CAS(14 → 19) 失败，再重试', 'c-bad']] },
+        moves: [['T2', 'top', 'CAS', 'ok'], ['T3', 'top', 'CAS', 'bad']] },
+      { title: 'T3 第三次才成功', desc: '<p>T3 重读 <code>top = 17</code>，终于 CAS 成功，对象放在 [17, 22)。</p>',
+        set: { objs: [...base2, obj('o1', 10, 14), obj('o2', 14, 17), obj('o3', 17, 22)], top: 22, th: { T2: T(''), T3: T('第 3 次 CAS 成功 ✓', 'c-ok') }, log: [['T3: CAS(17 → 22) 成功']] },
+        moves: [['T3', 'top', 'CAS', 'ok']] },
+      { title: '小结：线程越多，冲突越多', desc: '<p>分配 3 个对象用了 <b>6 次 CAS，其中 3 次失败</b>。</p><p class="bad">线程越多、分配越频繁，失败重试越多；而且所有核都在改同一个 <code>top</code>，这个缓存行会在核之间来回传递。</p><p>TLAB 就是为了把这种竞争降到“领一块 TLAB 才竞争一次”。</p>', dwell: 3600,
+        set: { th: { T3: T('') }, log: [['3 个对象 = 6 次 CAS（3 次失败）', 'c-bad'], ['有 TLAB 时 = 0 次 CAS（在 TLAB 内）', 'c-ok']] } },
+    ],
+  };
+
+  // ---------- 场景 3: TLAB 用完 ----------
+  const t1Old = [obj('a1', 0, 8, 'a1'), obj('a2', 8, 14, 'a2'), obj('a3', 14, 20, 'a3')];
+  const t2Old = [obj('b1', 22, 28, 'b1'), obj('b2', 28, 34, 'b2')];
+  const S3 = {
+    label: 'TLAB 不够用：废弃还是绕过？',
+    threads: ['T1', 'T2'],
+    state: { segs: [seg('T1', 0, 22, 20), seg('T2', 22, 50, 34)], objs: [...t1Old, ...t2Old], top: 50, th: {}, log: [], ghost: null },
+    steps: [
+      { title: '两个线程的 TLAB 都用了一部分', desc: '<p>假设 TLAB 大小 256KB，最大浪费阈值 <code>refill_waste</code> = 4KB（默认是 TLAB 的 1/64）。</p><p>T1 的 TLAB 只剩 <b>2KB</b>；T2 的 TLAB 还剩 <b>40KB</b>。</p>',
+        set: { th: { T1: T('TLAB 剩余 2KB', 'c-warn'), T2: T('TLAB 剩余 40KB') }, log: [['refill_waste = 4KB'], ['T1 剩余 2KB，T2 剩余 40KB']] } },
+      { title: 'T1 要分配 8KB 对象，放不下', desc: '<p><code>T1.top + 8KB &gt; T1.end</code>，当前 TLAB 装不下，进入慢路径。</p><p>要决定：<b>废弃这块 TLAB</b>，还是<b>保留它</b>？</p>',
+        set: { ghost: { x: 20, w: 9, label: '8KB 对象', owner: 'T1' }, th: { T1: T('要分配 8KB', 'c-warn') }, log: [['8KB > 剩余 2KB，放不下', 'c-warn']] } },
+      { title: '剩余 2KB < 4KB → 废弃当前 TLAB', desc: '<p>剩下的 2KB 太小，以后也很难用上，扔掉也不心疼。</p><p class="bad">这 2KB 就是浪费：JVM 会在里面填一个 dummy 对象，让堆保持可以连续遍历。</p>',
+        set: { segs: [seg('T1', 0, 22, 22, 'retired'), seg('T2', 22, 50, 34)], objs: [...t1Old, obj('w1', 20, 22, '', 'bad'), ...t2Old], log: [['2KB < refill_waste 4KB → 废弃 TLAB', 'c-bad'], ['剩余部分填充 dummy 对象（浪费 2KB）']] } },
+      { title: 'CAS 从 Eden 申请一块新 TLAB', desc: '<p>T1 用 <b>CAS</b> 推进共享的 <code>Eden top</code>，领一块新的 TLAB。</p>',
+        set: { segs: [seg('T1', 0, 22, 22, 'retired'), seg('T2', 22, 50, 34), seg('T1', 50, 72, 50)], top: 72, ghost: { x: 50, w: 9, label: '8KB 对象' }, th: { T1: T('CAS 领新 TLAB', 'c-accent') }, log: [['CAS(Eden top: 50 → 72) 成功'], ['T1 的新 TLAB：[50, 72)']] },
+        moves: [['T1', 61, 'CAS', 'warn']] },
+      { title: '在新 TLAB 中分配 8KB 对象', desc: '<p>回到快路径：在新 TLAB 里碰撞指针，分配 8KB 对象。</p>',
+        set: { ghost: null, segs: [seg('T1', 0, 22, 22, 'retired'), seg('T2', 22, 50, 34), seg('T1', 50, 72, 59)], objs: [...t1Old, obj('w1', 20, 22, '', 'bad'), ...t2Old, obj('a4', 50, 59, '8KB')], th: { T1: T('top += 8KB', 'c-ok') }, log: [['新 TLAB 中指针碰撞：0 次 CAS']] },
+        moves: [['T1', 54.5, '8KB', 'ok']] },
+      { title: 'T2 要分配 60KB 对象，也放不下', desc: '<p>T2 的 TLAB 还剩 40KB，装不下 60KB 的对象。</p><p>但如果现在废弃它，<b>40KB 就白白浪费了</b>。</p>',
+        set: { ghost: { x: 34, w: 18, label: '60KB 对象', owner: 'T2' }, th: { T1: T(''), T2: T('要分配 60KB', 'c-warn') }, log: [['60KB > 剩余 40KB，放不下', 'c-warn']] } },
+      { title: '剩余 40KB > 4KB → 保留 TLAB', desc: '<p>剩余空间还很多，不能扔。这个对象改为<b>直接在 Eden 共享区用 CAS 分配</b>。</p>',
+        set: { log: [['40KB > refill_waste 4KB → 不废弃'], ['这个对象走 Eden 共享区 CAS 分配']] } },
+      { title: '在共享 Eden 中 CAS 分配', desc: '<p>T2 用 CAS 推进 <code>Eden top</code>，60KB 对象放在共享区；T2 的 TLAB 原封不动。</p>',
+        set: { ghost: null, objs: [...t1Old, obj('w1', 20, 22, '', 'bad'), ...t2Old, obj('a4', 50, 59, '8KB'), obj('big', 72, 90, '60KB', 'violet')], top: 90, th: { T2: T('CAS 在共享区分配', 'c-violet') }, log: [['CAS(Eden top: 72 → 90) 成功'], ['T2 的 TLAB 保持不变，剩余 40KB']] },
+        moves: [['T2', 81, 'CAS', 'violet']] },
+      { title: '之后的小对象仍走 TLAB', desc: '<p>T2 接下来分配小对象，依旧在自己的 TLAB 里碰撞指针，不需要 CAS。</p>',
+        set: { segs: [seg('T1', 0, 22, 22, 'retired'), seg('T2', 22, 50, 38), seg('T1', 50, 72, 59)], objs: [...t1Old, obj('w1', 20, 22, '', 'bad'), ...t2Old, obj('a4', 50, 59, '8KB'), obj('big', 72, 90, '60KB', 'violet'), obj('b3', 34, 38, 'b3')], th: { T2: T('top += 4KB', 'c-ok') }, log: [['剩余空间没有浪费，继续使用']] },
+        moves: [['T2', 36, 'b3', 'ok']] },
+      { title: '小结', desc: '<p>TLAB 不够用时，看剩余空间和 <code>refill_waste</code>：</p><p>剩得少 → 废弃，CAS 领新 TLAB；剩得多 → 保留 TLAB，这个对象直接在 Eden 共享区 CAS 分配。</p><p>HotSpot 还会在每次走共享区分配后稍微调高阈值，避免一直绕过。</p>', dwell: 3600,
+        set: { th: { T2: T('') }, log: [['剩余 < refill_waste：废弃 + CAS 领新 TLAB'], ['剩余 ≥ refill_waste：保留 TLAB，对象在 Eden 共享区 CAS']] } },
+    ],
+  };
+
+  const scenarios = [S1, S2, S3];
+  let E;
+
+  function keyed(map, key, parent, make) {
+    let el = map.get(key);
+    if (!el) { el = make(parent); el.classList.add('hide'); el.getBoundingClientRect(); map.set(key, el); }
+    el.dataset.seen = '1';
+    return el;
+  }
+  const sweep = map => map.forEach(el => { el.classList.toggle('hide', !el.dataset.seen); delete el.dataset.seen; });
+
+  Player({
+    scenarios,
+    dwell: 2800,
+    init(g, ctx) {
+      const sc = scenarios[ctx.scenario];
+      E = { segs: new Map(), objs: new Map(), ptrs: new Map(), th: {} };
+      for (const t of sc.threads) {
+        const x = TX[t];
+        const box = svg('rect', { x: x - 60, y: 14, width: 120, height: 34, rx: 6, class: 'box anim' }, g);
+        svg('text', { x, y: 36, 'text-anchor': 'middle', class: 'title' }, g, '线程 ' + t);
+        const st = svg('text', { x, y: 70, 'text-anchor': 'middle', class: 'small mono' }, g, '');
+        E.th[t] = { box, st };
+      }
+      svg('text', { x: BX, y: BY - 34, class: 'small muted' }, g, 'Eden');
+      svg('rect', { x: BX, y: BY, width: BW, height: BH, rx: 4, class: 'eden' }, g);
+      E.segL = svg('g', {}, g); E.objL = svg('g', {}, g); E.ptrL = svg('g', {}, g);
+      // 共享 Eden top 指针 (在条的上方)
+      E.top = svg('g', { class: 'ptr violet' }, g);
+      svg('path', { d: 'M-7,-14 L7,-14 L0,-2 z' }, E.top);
+      svg('text', { x: 0, y: -20, 'text-anchor': 'middle', class: 'mono small c-violet' }, E.top, 'Eden top');
+      E.ghost = svg('g', { class: 'anim hide' }, g);
+      E.ghostR = svg('rect', { y: 92, height: 26, rx: 4, class: 'box warn dashed' }, E.ghost);
+      E.ghostT = svg('text', { y: 109, 'text-anchor': 'middle', class: 'small mono c-warn' }, E.ghost, '');
+      svg('rect', { x: BX, y: 296, width: BW, height: 92, rx: 8, class: 'box soft' }, g);
+      E.log = [0, 1, 2].map(k => svg('text', { x: BX + 16, y: 322 + k * 26, class: 'mono' }, g, ''));
+    },
+    render(st, step, i, ctx) {
+      const sc = scenarios[ctx.scenario];
+      // 线程状态
+      for (const t of sc.threads) {
+        const s = st.th[t] || { t: '', c: '' };
+        E.th[t].st.textContent = s.t;
+        E.th[t].st.setAttribute('class', 'small mono ' + s.c);
+        const c = s.c.includes('ok') ? 'ok' : s.c.includes('bad') ? 'bad' : s.c.includes('warn') ? 'warn' : s.c.includes('violet') ? 'violet' : s.c.includes('accent') ? 'accent' : '';
+        E.th[t].box.setAttribute('class', 'box anim ' + c);
+      }
+      // TLAB 段
+      for (const s of st.segs) {
+        const el = keyed(E.segs, s.id, E.segL, p => {
+          const gg = svg('g', { class: 'anim' }, p);
+          svg('rect', { x: X(s.a) + 1, y: BY + 3, width: X(s.b) - X(s.a) - 2, height: BH - 6, rx: 3, class: 'seg' }, gg);
+          svg('path', { d: `M${X(s.a) + 2},${BY + BH + 26} v6 H${X(s.b) - 2} v-6`, class: 'bracket' }, gg);
+          svg('text', { x: (X(s.a) + X(s.b)) / 2, y: BY + BH + 48, 'text-anchor': 'middle', class: 'small' }, gg, '');
+          return gg;
+        });
+        el.querySelector('rect').setAttribute('class', 'seg ' + s.cls);
+        const lab = el.querySelector('text');
+        lab.textContent = s.cls === 'retired' ? '已废弃' : s.owner + ' 的 TLAB';
+        lab.setAttribute('class', 'small ' + (s.cls === 'retired' ? 'muted' : 'c-accent'));
+        // 段内 top 指针 (在条的下方)
+        const ptr = keyed(E.ptrs, s.id, E.ptrL, p => {
+          const gg = svg('g', { class: 'ptr accent' }, p);
+          svg('path', { d: 'M-6,12 L6,12 L0,2 z' }, gg);
+          svg('text', { x: 0, y: 24, 'text-anchor': 'middle', class: 'mono small c-accent' }, gg, 'top');
+          gg.style.transform = `translate(${X(s.a)}px, ${BY + BH}px)`;
+          return gg;
+        });
+        ptr.style.transform = `translate(${X(s.top)}px, ${BY + BH}px)`;
+        if (s.cls === 'retired') delete ptr.dataset.seen;
+      }
+      sweep(E.segs); sweep(E.ptrs);
+      // 对象
+      for (const o of st.objs) {
+        const el = keyed(E.objs, o.id, E.objL, p => {
+          const gg = svg('g', { class: 'anim' }, p);
+          svg('rect', { x: X(o.a) + 2, y: BY + 10, width: X(o.b) - X(o.a) - 4, height: BH - 20, rx: 3, class: 'box anim' }, gg);
+          svg('text', { x: (X(o.a) + X(o.b)) / 2, y: BY + BH / 2 + 4, 'text-anchor': 'middle', class: 'small mono' }, gg, o.label);
+          return gg;
+        });
+        el.querySelector('rect').setAttribute('class', 'box anim ' + o.cls);
+      }
+      sweep(E.objs);
+      // Eden top
+      E.top.style.transform = `translate(${X(st.top)}px, ${BY}px)`;
+      // 放不下的对象
+      if (st.ghost) {
+        E.ghostR.setAttribute('x', X(st.ghost.x)); E.ghostR.setAttribute('width', X(st.ghost.w) - BX);
+        E.ghostT.setAttribute('x', X(st.ghost.x + st.ghost.w / 2)); E.ghostT.textContent = st.ghost.label;
+      }
+      E.ghost.classList.toggle('hide', !st.ghost);
+      E.log.forEach((t, k) => {
+        const l = st.log[k] || [''];
+        t.textContent = l[0]; t.setAttribute('class', 'mono ' + (l[1] || ''));
+      });
+      // 飞行动画
+      const pt = v => typeof v === 'number' ? { x: X(v), y: BY - 6 } : v === 'top' ? { x: X(st.top), y: BY - 18 } : { x: TX[v], y: 50 };
+      for (const [a, b, label, cls] of step.moves || []) {
+        const pk = packet(ctx.fx, pt(a), pt(b), label, cls);
+        setTimeout(() => pk.classList.add('hide'), 1300);
+      }
+    },
+  });
+})();
+</script>
+</body>
+</html>

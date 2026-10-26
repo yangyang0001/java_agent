@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GC Roots 动态图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .stage .node { transition: transform .7s cubic-bezier(.4, 0, .2, 1), opacity .5s ease; }
+  .stage .node.gone { opacity: .16; }
+  .stage .node.gone rect { stroke-dasharray: 4 3; }
+  .stage .node.hot rect { stroke-width: 2.6; }
+  .stage path.edge { fill: none; stroke: var(--line); stroke-width: 1.6; transition: d .7s cubic-bezier(.4, 0, .2, 1), stroke .4s ease, opacity .45s ease; }
+  .stage path.edge.ok { stroke: var(--ok); }
+  .stage path.edge.accent { stroke: var(--accent); stroke-width: 2.2; }
+  .stage path.edge.bad { stroke: var(--bad); }
+  .stage path.edge.hide { opacity: 0; }
+  .stage .region { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 5 4; }
+  .stage .region.dim { fill: var(--bg); opacity: .55; }
+  .stage .card { fill: var(--surface); stroke: var(--line); }
+  .stage .card.warn { fill: var(--warn-soft); stroke: var(--warn); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">JVM · 3 · GC Roots</p>
+    <h1>GC Roots：从根出发，走不到的对象就是垃圾</h1>
+    <p class="lede">GC Roots 是可达性分析的起点，是一组一定存活的引用。GC 从它们出发沿引用链向下搜索，能到达的对象存活，到达不了的对象判定为可回收。这种方式能正确处理引用计数法解决不了的循环引用。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>GC Roots 与堆中的对象图</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--violet)"></i>GC Roots</span>
+            <span><i class="sw" style="background:var(--ok)"></i>已标记（存活）</span>
+            <span><i class="sw" style="background:var(--bad)"></i>不可达（垃圾）</span>
+            <span><i class="sw" style="background:var(--warn)"></i>需要注意</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 420" role="img" aria-label="从 GC Roots 出发沿引用标记对象，未被标记的对象被回收"></svg>
+        <p class="cap">动画是示意：真实 GC 用 OopMap 快速找到栈中的引用，标记过程通常用三色标记，这里按层展示搜索顺序。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>代码</h2></div>
+        <pre class="code" id="code"></pre>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>可以作为 GC Roots 的引用</th><th>例子</th></tr></thead>
+        <tbody>
+          <tr><td>虚拟机栈（栈帧的局部变量表）中引用的对象</td><td>方法参数、局部变量</td></tr>
+          <tr><td>方法区中类静态属性引用的对象</td><td><code>static Map CACHE</code></td></tr>
+          <tr><td>方法区中常量引用的对象</td><td>字符串常量池中的引用</td></tr>
+          <tr><td>本地方法栈中 JNI 引用的对象</td><td>native 方法持有的对象</td></tr>
+          <tr><td>被 <code>synchronized</code> 持有的对象</td><td>正在作为锁的对象</td></tr>
+          <tr><td>JVM 内部引用</td><td>基本类型的 Class 对象、常驻异常对象（NPE、OOM）、系统类加载器</td></tr>
+          <tr><td>局部回收时的跨代引用</td><td>Young GC 时，记忆集 / 卡表记录的老年代 → 新生代引用临时作为根</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul style="margin-top:10px">
+      <li>是什么：可达性分析算法的起点集合，是一组一定存活的对象引用。</li>
+      <li>干什么：从 GC Roots 沿引用链向下搜索，能到达的对象存活，到达不了的对象可回收；能解决引用计数法无法处理的循环引用。</li>
+      <li>不可达不等于立刻死亡：如果覆盖了 <code>finalize()</code> 且没执行过，会放入 F-Queue 执行一次，有一次自救机会（JDK 9 起 <code>finalize</code> 已废弃）。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet } = Player;
+
+  // ---------- 三个场景的对象图 ----------
+  const R = (x, y, label, w) => ({ x, y, label, w: w || 156, h: 30, root: true });
+  const O = (x, y, label, w) => ({ x, y, label, w: w || 88, h: 30 });
+  const F = (x, y, label, w, h) => ({ x, y, label, w, h, frame: true });
+
+  const G1 = {
+    nodes: {
+      rStack: R(100, 76, '栈：局部变量 order'), rStatic: R(100, 136, '静态变量 CACHE'), rConst: R(100, 196, '常量 HI'),
+      rJni: R(100, 256, 'JNI 引用 buf'), rSync: R(100, 316, 'synchronized(lock)'),
+      Order: O(300, 76, 'Order'), Item: O(430, 76, 'Item'), Sku: O(560, 106, 'Sku'),
+      Map: O(300, 136, 'HashMap'), Entry: O(430, 136, 'Entry'),
+      Str: O(300, 196, 'String "hi"', 100), Buf: O(300, 256, 'NativeBuf', 96), Lock: O(300, 316, 'Lock'),
+      A: O(560, 226, 'A', 70), B: O(690, 226, 'B', 70), C: O(560, 336, 'C', 70), D: O(690, 336, 'D', 70),
+    },
+    edges: [['rStack', 'Order'], ['Order', 'Item'], ['Item', 'Sku'], ['rStatic', 'Map'], ['Map', 'Entry'], ['Entry', 'Sku'],
+      ['rConst', 'Str'], ['rJni', 'Buf'], ['rSync', 'Lock'], ['A', 'B', 6], ['B', 'A', 6], ['C', 'D']],
+    deco(g) {
+      svg('rect', { x: 12, y: 44, width: 176, height: 310, rx: 10, class: 'region' }, g);
+      svg('text', { x: 20, y: 34, class: 'title' }, g, 'GC Roots');
+      svg('rect', { x: 216, y: 44, width: 532, height: 330, rx: 10, class: 'region' }, g);
+      svg('text', { x: 224, y: 34, class: 'title' }, g, '堆');
+      svg('text', { x: 625, y: 280, 'text-anchor': 'middle', class: 'small muted' }, g, 'A ↔ B 互相引用');
+    },
+  };
+
+  const G2 = {
+    nodes: {
+      fMain: F(100, 344, 'main()', 156, 80), fProc: F(100, 222, 'process()', 156, 120),
+      list: R(100, 358, '局部变量 list', 124), buf: R(100, 214, '局部变量 buf', 124), r: R(100, 256, '局部变量 r', 124),
+      AL: O(330, 358, 'ArrayList', 96), O1: O(490, 330, 'Order#1', 88), O2: O(490, 382, 'Order#2', 88),
+      Rep: O(330, 256, 'Report', 88), Bytes: O(490, 214, 'byte[1024]', 100),
+    },
+    edges: [['list', 'AL'], ['AL', 'O1'], ['AL', 'O2'], ['buf', 'Bytes'], ['r', 'Rep'], ['Rep', 'Bytes']],
+    deco(g) {
+      svg('rect', { x: 12, y: 44, width: 176, height: 360, rx: 10, class: 'region' }, g);
+      svg('text', { x: 20, y: 34, class: 'title' }, g, '虚拟机栈（线程 main）');
+      svg('text', { x: 100, y: 64, 'text-anchor': 'middle', class: 'small muted' }, g, '↑ 栈顶');
+      svg('rect', { x: 216, y: 44, width: 532, height: 360, rx: 10, class: 'region' }, g);
+      svg('text', { x: 224, y: 34, class: 'title' }, g, '堆');
+    },
+  };
+
+  const G3 = {
+    nodes: {
+      rStack: R(100, 110, '栈：局部变量 a', 150),
+      Y1: O(275, 110, 'Y1', 70), Y4: O(275, 196, 'Y4', 70), Y3: O(405, 110, 'Y3', 70), Y2: O(405, 196, 'Y2', 70),
+      O1: O(575, 196, 'O1', 70), O2: O(680, 110, 'O2', 70), O3: O(680, 226, 'O3', 70),
+    },
+    edges: [['rStack', 'Y1'], ['Y1', 'Y4'], ['O2', 'O3'], ['O1', 'Y2']],
+    deco(g, E) {
+      svg('rect', { x: 12, y: 44, width: 176, height: 130, rx: 10, class: 'region' }, g);
+      svg('text', { x: 20, y: 34, class: 'title' }, g, 'GC Roots');
+      svg('rect', { x: 210, y: 44, width: 262, height: 336, rx: 10, class: 'region' }, g);
+      svg('text', { x: 218, y: 34, class: 'title' }, g, '新生代');
+      svg('rect', { x: 222, y: 60, width: 238, height: 180, rx: 8, class: 'box soft' }, g);
+      svg('text', { x: 232, y: 78, class: 'small muted' }, g, 'Eden');
+      svg('rect', { x: 222, y: 260, width: 238, height: 112, rx: 8, class: 'box soft' }, g);
+      svg('text', { x: 232, y: 362, class: 'small muted' }, g, 'Survivor (To)');
+      E.deco.old = svg('rect', { x: 490, y: 44, width: 258, height: 236, rx: 10, class: 'region' }, g);
+      svg('text', { x: 498, y: 34, class: 'title' }, g, '老年代');
+      svg('text', { x: 498, y: 354, class: 'small muted' }, g, '卡表（每张卡对应老年代 512 字节）');
+      for (let k = 0; k < 6; k++) {
+        E.deco['card' + k] = svg('rect', { x: 498 + k * 41, y: 312, width: 35, height: 24, rx: 3, class: 'card anim' }, g);
+        E.deco['cardT' + k] = svg('text', { x: 515.5 + k * 41, y: 328, 'text-anchor': 'middle', class: 'mono small muted' }, g, '0');
+      }
+      svg('line', { x1: 575, y1: 211, x2: 556, y2: 310, class: 'wire dashed' }, g);
+    },
+  };
+
+  const ROOTS1 = ['rStack', 'rStatic', 'rConst', 'rJni', 'rSync'];
+  const all = (ids, v) => Object.fromEntries(ids.map(id => [id, v]));
+
+  const scenarios = [
+    {
+      label: '可达性分析与循环引用',
+      graph: G1,
+      code: ['static Map CACHE = new HashMap();', 'static final String HI = "hi";', 'void handle() {', '  Order order = new Order();', '  synchronized (lock) {', '    nativeCall(buf); // JNI', '  }', '}', '// A、B、C、D 不再被任何根引用'],
+      state: { n: {}, tag: {}, hidden: [], pos: {}, e: {}, deco: {} },
+      steps: [
+        { title: '堆中的对象与引用', desc: '<p>左边是 GC Roots，右边是堆里的对象，箭头表示引用。</p><p>A 和 B 互相引用，C 引用 D，但没有任何根指向它们。</p>', line: 9 },
+        { title: '引用计数法：循环引用回收不掉', desc: '<p>如果用<b>引用计数</b>：C 的计数是 0，回收 C 后 D 也变成 0。</p><p class="bad">A、B 互相引用，计数永远是 1，即使程序再也用不到它们，也永远回收不掉。</p><p>所以 HotSpot 不用引用计数，而用<b>可达性分析</b>。</p>',
+          set: { tag: { A: 'rc=1', B: 'rc=1', C: 'rc=0', D: 'rc=1' }, n: { A: 'warn', B: 'warn' } }, hot: ['A', 'B'] },
+        { title: '暂停用户线程，枚举 GC Roots', desc: '<p>GC 先 STW，找出所有根：栈中的局部变量、静态变量、常量、JNI 引用、被 <code>synchronized</code> 持有的对象……</p><p>HotSpot 借助 <b>OopMap</b> 直接知道栈上哪些位置是引用，不用扫描整个栈。</p>',
+          line: [1, 2, 4, 5, 6], set: { tag: { A: '', B: '', C: '', D: '' }, n: { A: '', B: '', ...all(ROOTS1, 'accent') } }, hot: ROOTS1 },
+        { title: '第 1 层：根直接引用的对象', desc: '<p>从每个根出发，把它<b>直接引用</b>的对象标记为存活：<code>Order</code>、<code>HashMap</code>、<code>String</code>、<code>NativeBuf</code>、<code>Lock</code>。</p>',
+          set: { n: { ...all(ROOTS1, ''), Order: 'ok', Map: 'ok', Str: 'ok', Buf: 'ok', Lock: 'ok' } }, hot: ['Order', 'Map', 'Str', 'Buf', 'Lock'],
+          flow: [['rStack', 'Order'], ['rStatic', 'Map'], ['rConst', 'Str'], ['rJni', 'Buf'], ['rSync', 'Lock']] },
+        { title: '第 2 层：沿引用继续向下', desc: '<p>从刚标记的对象继续走：<code>Order → Item</code>，<code>HashMap → Entry</code>。</p>',
+          set: { n: { Item: 'ok', Entry: 'ok' } }, hot: ['Item', 'Entry'], flow: [['Order', 'Item'], ['Map', 'Entry']] },
+        { title: '第 3 层：已标记的对象不再重复访问', desc: '<p><code>Item → Sku</code>，Sku 被标记。<code>Entry → Sku</code> 走到时发现已经标记过，直接跳过。</p><p>所以对象图里就算有环，搜索也不会死循环。</p>',
+          set: { n: { Sku: 'ok' } }, hot: ['Sku'], flow: [['Item', 'Sku'], ['Entry', 'Sku', 'violet']] },
+        { title: '标记结束：A、B、C、D 不可达', desc: '<p>没有新的对象可以访问了，标记结束。</p><p class="bad">A、B 虽然互相引用，但没有一条从根出发的路径能到达它们，判定为可回收。</p><p>补充：如果覆盖了 <code>finalize()</code> 且没执行过，会先放进 F-Queue 执行一次，有一次自救机会。</p>',
+          set: { n: { A: 'bad', B: 'bad', C: 'bad', D: 'bad' }, tag: { A: '不可达', B: '不可达', C: '不可达', D: '不可达' } }, hot: ['A', 'B', 'C', 'D'] },
+        { title: '回收不可达对象', desc: '<p>不可达对象占用的内存被回收（清除、整理或复制，取决于收集器）。</p><p class="ok">循环引用的 A、B 也被正确回收，这就是可达性分析比引用计数强的地方。</p>',
+          set: { n: { A: 'bad gone', B: 'bad gone', C: 'bad gone', D: 'bad gone' }, tag: { A: '', B: '', C: '', D: '' } } },
+        { title: '小结', desc: '<p><b>是不是垃圾</b>只看：从 GC Roots 出发能不能走到它。</p><p>被谁引用、被引用几次都不重要；能走到的全部存活，走不到的全部回收。</p>', dwell: 3400 },
+      ],
+    },
+    {
+      label: '局部变量出作用域',
+      graph: G2,
+      code: ['void main() {', '    List<Order> list = loadOrders();', '    process();', '    System.gc();  // 假设这里发生 GC', '}', 'void process() {', '    byte[] buf = new byte[1024];', '    Report r = new Report(buf);', '    r.print();', '}   // 返回：栈帧出栈'],
+      state: { n: {}, tag: {}, hidden: ['fProc', 'buf', 'r', 'Rep', 'Bytes'], pos: { fProc: [100, 182], buf: [100, 174], r: [100, 216] }, e: {}, deco: {} },
+      steps: [
+        { title: 'main 方法执行', desc: '<p>main 的栈帧里有局部变量 <code>list</code>，它是一个 GC Root，指向堆中的 <code>ArrayList</code> 和两个 <code>Order</code>。</p>', line: 2 },
+        { title: '调用 process()，压入新栈帧', desc: '<p>每调用一个方法，就在虚拟机栈顶压入一个栈帧，局部变量表就在栈帧里。</p>',
+          line: [3, 6], set: { hidden: ['buf', 'r', 'Rep', 'Bytes'], pos: { fProc: null } }, hot: ['fProc'] },
+        { title: 'buf = new byte[1024]', desc: '<p>在堆中创建数组，局部变量 <code>buf</code> 引用它。<code>buf</code> 在栈帧的局部变量表里，所以也是 GC Root。</p>',
+          line: 7, set: { hidden: ['r', 'Rep'], pos: { buf: null } }, hot: ['Bytes'] },
+        { title: 'r = new Report(buf)', desc: '<p>创建 <code>Report</code>，它内部也引用了这个数组。</p>',
+          line: 8, set: { hidden: [], pos: { r: null } }, hot: ['Rep'] },
+        { title: '如果此刻 GC：全部可达', desc: '<p><code>buf</code>、<code>r</code> 还在栈帧里，是根，所以 <code>Report</code> 和 <code>byte[]</code> 都可达，不会被回收。</p>',
+          line: 9, set: { n: { AL: 'ok', O1: 'ok', O2: 'ok', Rep: 'ok', Bytes: 'ok' } } },
+        { title: 'process() 返回，栈帧出栈', desc: '<p>方法返回后整个栈帧被弹出，局部变量 <code>buf</code>、<code>r</code> 随之消失，它们<b>不再是 GC Root</b>。</p><p class="warn">对象还留在堆里，但已经没有任何根能到达它们。</p>',
+          line: 10, set: { n: { AL: '', O1: '', O2: '', Rep: '', Bytes: '' }, hidden: ['fProc', 'buf', 'r'], pos: { fProc: [100, 182], buf: [100, 174], r: [100, 216] } } },
+        { title: '发生 GC：只剩 list 一个根', desc: '<p>从 <code>list</code> 出发标记 <code>ArrayList</code> 和两个 <code>Order</code>。</p>',
+          line: 4, set: { n: { list: 'accent', AL: 'ok', O1: 'ok', O2: 'ok' } }, hot: ['AL', 'O1', 'O2'], flow: [['list', 'AL'], ['AL', 'O1'], ['AL', 'O2']] },
+        { title: 'Report 和 byte[] 不可达', desc: '<p><code>Report → byte[]</code> 这条引用还在，但它们组成的子图没有任何根能到达。</p>',
+          line: 4, set: { n: { list: '', Rep: 'bad', Bytes: 'bad' }, tag: { Rep: '不可达', Bytes: '不可达' } }, hot: ['Rep', 'Bytes'] },
+        { title: '回收', desc: '<p>整棵子图一起被回收。</p><p>所以方法里的临时对象一般不需要手动置 <code>null</code>：方法结束、栈帧出栈后，它们自然就不可达了。</p><p>补充：JIT 编译后，局部变量在最后一次使用之后就可能不再算作根，回收可能更早。</p>',
+          line: 4, set: { n: { Rep: 'bad gone', Bytes: 'bad gone' }, tag: { Rep: '', Bytes: '' } }, dwell: 3400 },
+      ],
+    },
+    {
+      label: 'Young GC：卡表作为额外的根',
+      graph: G3,
+      code: ['Old o1 = ...;        // 已在老年代', 'o1.ref = new Y2();   // 老 → 新 引用', '// JIT 插入的写屏障:', '// card[addr(o1) >> 9] = dirty'],
+      state: { n: {}, tag: {}, hidden: [], pos: {}, e: {}, deco: {} },
+      steps: [
+        { title: '分代的堆', desc: '<p>新生代对象 <code>Y1</code> 被局部变量 <code>a</code> 引用，<code>Y1 → Y4</code>。</p><p><code>Y2</code> 只被老年代对象 <code>O1</code> 引用，这是一条<b>跨代引用</b>。</p>' },
+        { title: '写屏障把卡标记为 dirty', desc: '<p>执行 <code>o1.ref = y2</code> 时，JIT 插入的写屏障把 o1 所在的卡（每 512 字节一张）标成 <b class="warn">dirty</b>。</p><p>卡表就是记忆集（Remembered Set）的一种实现。</p>',
+          line: [2, 4], set: { e: { 'O1>Y2': 'accent' }, deco: { card1: 'card anim warn', cardT1: 'mono small c-warn' } }, hot: ['O1'] },
+        { title: 'Young GC 开始：不扫老年代', desc: '<p>Young GC 只回收新生代。老年代很大，如果为了找跨代引用把它整个扫一遍，就失去了分代收集的意义。</p>',
+          set: { deco: { old: 'region dim' } } },
+        { title: '只从 GC Roots 出发会漏掉 Y2', desc: '<p>从根出发标记到 <code>Y1</code>、<code>Y4</code>。</p><p class="bad">Y2 走不到。如果只看 GC Roots，Y2 会被当成垃圾回收，而 O1 还在用它。</p>',
+          set: { n: { Y1: 'ok', Y4: 'ok', Y2: 'warn' }, tag: { Y2: '漏标？' } }, hot: ['Y1', 'Y4'], flow: [['rStack', 'Y1'], ['Y1', 'Y4']] },
+        { title: '扫描 dirty 卡，O1 临时作为根', desc: '<p>GC 只扫描 <b>dirty 卡</b> 对应的那一小块老年代，找到 <code>O1.ref</code>，把它当作额外的 GC Root。</p><p class="ok">Y2 被标记为存活。</p>',
+          line: 4, set: { n: { O1: 'accent', Y2: 'ok' }, tag: { Y2: '' } }, hot: ['Y2'], flow: [['O1', 'Y2']] },
+        { title: 'Y3 不可达', desc: '<p>没有根、也没有 dirty 卡指向 <code>Y3</code>，它是垃圾。</p>',
+          set: { n: { Y3: 'bad' }, tag: { Y3: '不可达' } }, hot: ['Y3'] },
+        { title: '复制存活对象到 Survivor', desc: '<p>新生代用复制算法：<code>Y1</code>、<code>Y4</code>、<code>Y2</code> 复制到 Survivor，O1 中的引用同时更新到新地址。</p><p>Eden 整块清空，<code>Y3</code> 随之被回收。</p>',
+          set: { n: { O1: '', Y3: 'bad gone' }, tag: { Y3: '' }, pos: { Y1: [262, 316], Y4: [342, 316], Y2: [422, 316] } } },
+        { title: '小结', desc: '<p>局部回收时，<b>老年代 → 新生代</b>的引用（由记忆集 / 卡表记录）也要临时作为 GC Roots。</p><p>G1 中每个 Region 都有自己的 RSet，原理相同。</p>', dwell: 3400,
+          set: { deco: { old: 'region' } } },
+      ],
+    },
+  ];
+
+  // ---------- 通用对象图渲染 ----------
+  let E;
+  const posOf = (st, id) => (st.pos[id] || [E.g.nodes[id].x, E.g.nodes[id].y]);
+
+  function clip(n, p, q) {
+    const dx = q[0] - p[0], dy = q[1] - p[1];
+    const t = Math.min(dx ? (n.w / 2 + 2) / Math.abs(dx) : Infinity, dy ? (n.h / 2 + 2) / Math.abs(dy) : Infinity);
+    return [p[0] + dx * t, p[1] + dy * t];
+  }
+  function ends(st, a, b, off) {
+    let p = posOf(st, a), q = posOf(st, b);
+    if (off) {
+      const dx = q[0] - p[0], dy = q[1] - p[1], L = Math.hypot(dx, dy) || 1;
+      const ox = -dy / L * off, oy = dx / L * off;
+      p = [p[0] + ox, p[1] + oy]; q = [q[0] + ox, q[1] + oy];
+    }
+    return [clip(E.g.nodes[a], p, q), clip(E.g.nodes[b], q, p)];
+  }
+
+  Player({
+    scenarios,
+    dwell: 2800,
+    init(g, ctx) {
+      const G = scenarios[ctx.scenario].graph;
+      E = { g: G, nodes: {}, edges: {}, deco: {} };
+      const defs = svg('defs', {}, g);
+      for (const c of ['line', 'ok', 'accent', 'bad']) {
+        const m = svg('marker', { id: 'gm-' + c, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, defs);
+        svg('path', { d: 'M0,0 L10,5 L0,10 z', style: `fill: var(--${c})` }, m);
+      }
+      G.deco(g, E);
+      const eg = svg('g', {}, g), ng = svg('g', {}, g);
+      // 先画栈帧, 再画其他节点, 保证局部变量在栈帧之上
+      const ids = Object.keys(G.nodes).sort((a, b) => (G.nodes[b].frame ? 1 : 0) - (G.nodes[a].frame ? 1 : 0));
+      for (const id of ids) {
+        const n = G.nodes[id];
+        const el = svg('g', { class: 'node' }, ng);
+        const rect = svg('rect', { x: -n.w / 2, y: -n.h / 2, width: n.w, height: n.h, rx: 6, class: 'box anim' }, el);
+        if (n.frame) svg('text', { x: -n.w / 2 + 10, y: -n.h / 2 + 17, class: 'small muted mono' }, el, '栈帧 ' + n.label);
+        else svg('text', { x: 0, y: 4.5, 'text-anchor': 'middle', class: n.root ? '' : 'mono' }, el, n.label);
+        const tag = svg('text', { x: 0, y: -n.h / 2 - 6, 'text-anchor': 'middle', class: 'small mono' }, el, '');
+        E.nodes[id] = { el, rect, tag };
+      }
+      for (const [a, b, off] of G.edges) {
+        E.edges[a + '>' + b] = svg('path', { class: 'edge' }, eg);
+      }
+    },
+    render(st, step, i, ctx) {
+      const G = E.g, hot = step.hot || [];
+      const cls = id => {
+        const c = st.n[id];
+        if (c) return c;
+        if (G.nodes[id].frame) return 'soft';
+        return G.nodes[id].root ? 'violet' : '';
+      };
+      for (const id in G.nodes) {
+        const N = E.nodes[id], c = cls(id), [x, y] = posOf(st, id);
+        N.el.style.transform = `translate(${x}px, ${y}px)`;
+        N.el.setAttribute('class', 'node' + (st.hidden.includes(id) ? ' hide' : '') + (c.includes('gone') ? ' gone' : '') + (hot.includes(id) ? ' hot' : ''));
+        N.rect.setAttribute('class', 'box anim ' + c.replace('gone', ''));
+        const t = st.tag[id] || '';
+        N.tag.textContent = t;
+        N.tag.setAttribute('class', 'small mono ' + (c.includes('bad') ? 'c-bad' : c.includes('warn') ? 'c-warn' : 'c-accent'));
+      }
+      for (const [a, b, off] of G.edges) {
+        const key = a + '>' + b, p = E.edges[key];
+        const [s, t] = ends(st, a, b, off);
+        const d = `M${s[0].toFixed(1)},${s[1].toFixed(1)} L${t[0].toFixed(1)},${t[1].toFixed(1)}`;
+        p.setAttribute('d', d);
+        p.style.d = `path("${d}")`;
+        const ca = cls(a), cb = cls(b);
+        let c = st.e[key] || '';
+        if (!c && /ok/.test(cb) && (/ok|accent/.test(ca) || G.nodes[a].root)) c = 'ok';
+        if (!c && /bad/.test(ca) && /bad/.test(cb)) c = 'bad';
+        const hidden = st.hidden.includes(a) || st.hidden.includes(b) || /gone/.test(ca) || /gone/.test(cb);
+        p.setAttribute('class', 'edge ' + c + (hidden ? ' hide' : ''));
+        p.setAttribute('marker-end', `url(#gm-${c && c !== 'violet' ? c : 'line'})`);
+      }
+      for (const id in E.deco) {
+        if (st.deco[id]) E.deco[id].setAttribute('class', st.deco[id]);
+        else E.deco[id].setAttribute('class', id === 'old' ? 'region' : id.startsWith('cardT') ? 'mono small muted' : 'card anim');
+        if (id.startsWith('cardT')) E.deco[id].textContent = (st.deco[id] || '').includes('warn') ? '1' : '0';
+      }
+      for (const [a, b, c] of step.flow || []) {
+        const [s, t] = ends(st, a, b, 0);
+        const pk = packet(ctx.fx, { x: s[0], y: s[1] }, { x: t[0], y: t[1] }, '', c || 'ok');
+        setTimeout(() => pk.classList.add('hide'), 1000);
+      }
+    },
+  });
+})();
+</script>
+</body>
+</html>

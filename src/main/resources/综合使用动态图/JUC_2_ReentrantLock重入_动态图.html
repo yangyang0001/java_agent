@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReentrantLock 重入动态图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .code, .stage text { font-variant-ligatures: none; }
+  .stage text.big { font-family: var(--f-mono); font-size: 26px; font-weight: 600; }
+  .stage .late { animation: late .35s .6s both; }
+  @keyframes late { from { opacity: 0; } }
+  .stage .hl { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; }
+  .stage .pip { fill: var(--ok); stroke: var(--ok); }
+  .stage .pip.off { fill: var(--surface); stroke: var(--line); }
+  @media (prefers-reduced-motion: reduce) { .stage .late { animation: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">JUC · 2 · ReentrantLock</p>
+    <h1>ReentrantLock：可重入计数与公平 / 非公平</h1>
+    <p class="lede">已经持有锁的线程再次获取同一把锁时直接成功，不会被自己阻塞。AQS 用 <code>exclusiveOwnerThread</code> 记录持锁线程，用 <code>state</code> 记录重入次数：lock 一次加 1，unlock 一次减 1，减到 0 才真正释放并唤醒后继。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>持锁线程、重入计数与等待队列</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--ok)"></i>持有锁</span>
+            <span><i class="sw" style="background:var(--warn)"></i>park 挂起</span>
+            <span><i class="sw" style="background:var(--accent)"></i>当前动作</span>
+            <span><i class="sw" style="background:var(--bad)"></i>获取失败 / 问题</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 430" role="img" aria-label="ReentrantLock 的 state 重入计数、持锁线程和等待队列随步骤变化"></svg>
+        <p class="cap">state 旁边的圆点表示重入层数。队列节点之间上面的箭头是 next，下面的箭头是 prev；head 是不关联线程的哑节点。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>代码（JDK 8，简化）</h2></div>
+        <pre class="code" id="code"></pre>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <ul>
+      <li>可重入：已经持有锁的线程再次获取同一把锁可以直接成功，避免自己和自己死锁（如递归调用加锁方法）。</li>
+      <li>实现：<code>lock</code> 时 <code>state == 0</code> → CAS 设为 1 并记录 owner；<code>state != 0</code> 且 owner 是当前线程 → <code>state + 1</code>（重入，直接 setState，无需 CAS）。</li>
+      <li><code>unlock</code> 时 <code>state - 1</code>，减到 0 才真正释放（owner 置 null）并唤醒后继。所以 <b>lock 了几次就必须 unlock 几次</b>，<code>unlock</code> 要放在 <code>finally</code> 中。</li>
+      <li>公平 / 非公平：非公平锁（默认）获取时先直接 CAS 抢一次；公平锁先通过 <code>hasQueuedPredecessors()</code> 判断队列中有没有人在排队。</li>
+      <li><code>synchronized</code> 也是可重入的，靠 ObjectMonitor 中的 <code>_recursions</code> 计数。</li>
+    </ul>
+    <div class="tablewrap" style="margin-top:10px">
+      <table>
+        <thead><tr><th></th><th>非公平锁 <code>new ReentrantLock()</code></th><th>公平锁 <code>new ReentrantLock(true)</code></th></tr></thead>
+        <tbody>
+          <tr><td>lock() 第一步</td><td>直接 <code>CAS(0, 1)</code> 抢锁</td><td>直接 <code>acquire(1)</code></td></tr>
+          <tr><td>tryAcquire 且 state == 0</td><td>直接 CAS</td><td>先看 <code>hasQueuedPredecessors()</code>，有人排队就不抢</td></tr>
+          <tr><td>效果</td><td>吞吐高，但队列中的线程可能被插队、甚至饥饿</td><td>严格 FIFO，线程切换多，吞吐较低</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet, arrow, move } = Player;
+  const NX = k => 270 + k * 158, NY = 216, NW = 128, NH = 92, TY = 342;
+  const POS = { owner: { x: 664, y: 70 }, e0: { x: 128, y: 70 }, e1: { x: 128, y: 146 }, w: { x: 690, y: 188 } };
+  const WSN = { 0: '', '-1': 'SIGNAL', 1: 'CANCELLED' };
+  const H = (o) => ({ id: 'h', th: null, ws: 0, ...o });
+
+  const S1 = { side: 'T1 的调用栈', title: 'ReentrantLock（非公平）', state: 0, owner: null, stack: [], left: [], nodes: [],
+    toks: { T1: { at: 'e0', cls: '', s: '' }, T2: { at: 'w', cls: '', s: '稍后 lock()' } }, result: '' };
+  const SQ = (title) => ({ side: '新到达的线程', title, state: 1, owner: 'T1', stack: [], left: [],
+    nodes: [H({ ws: -1 }), { id: 'n2', th: 'T2', ws: 0 }],
+    toks: { T1: { at: 'owner', cls: 'ok', s: '持有锁' }, T2: { at: 'n2', cls: 'warn', s: 'park 挂起' }, T3: { at: 'e0', cls: '', s: '即将 lock()' } }, result: '' });
+
+  const scenarios = [
+    {
+      label: '重入：state 0→1→2→3→0',
+      state: S1,
+      code: [
+        '// Sync.nonfairTryAcquire(acq)',
+        'int c = getState();',
+        'if (c == 0) {',
+        '  if (compareAndSetState(0, acq)) {',
+        '    setExclusiveOwnerThread(cur);',
+        '    return true;',
+        '  }',
+        '} else if (current ==',
+        '      getExclusiveOwnerThread()) {',
+        '  int nextc = c + acq; // 重入',
+        '  setState(nextc);   // 无需 CAS',
+        '  return true;',
+        '}',
+        'return false;',
+        '// Sync.tryRelease(releases)',
+        'int c = getState() - releases;',
+        'boolean free = false;',
+        'if (c == 0) {',
+        '  free = true;',
+        '  setExclusiveOwnerThread(null);',
+        '}',
+        'setState(c);',
+        'return free;  // true 才唤醒后继',
+      ],
+      steps: [
+        { title: '初始状态', desc: '<p>T1 依次调用 <code>a() → b() → c()</code>，三个方法里都会 <code>lock.lock()</code>，并在 <code>finally</code> 中 <code>unlock()</code>。</p><p>T2 稍后也来抢同一把锁。</p>' },
+        { title: 'a()：CAS 0→1，owner = T1', desc: '<p>state 为 0，CAS 成功，<code>exclusiveOwnerThread = T1</code>。</p>',
+          line: [3, 4, 5], set: { state: 1, owner: 'T1', stack: ['a'], toks: { T1: { at: 'owner', cls: 'ok', s: '持有锁' } } }, hot: ['state', 'owner'], moves: [['e0', 'state', 'CAS 0→1', 'ok']] },
+        { title: 'b()：重入，state = 2', desc: '<p>state = 1 ≠ 0，但 owner 就是当前线程 T1，所以是<b>重入</b>：<code>nextc = c + 1</code>，直接 <code>setState(2)</code>。</p><p>只有持锁线程自己会走到这里，不存在竞争，<b>不需要 CAS</b>。</p>',
+          line: [8, 9, 10, 11], set: { state: 2, stack: ['a', 'b'] }, hot: ['state'], moves: [['owner', 'state', '+1', 'ok']] },
+        { title: 'T2：获取失败，入队 park', desc: '<p>T2 的 CAS 失败；<code>tryAcquire</code> 中 state ≠ 0 且 owner 不是 T2，返回 <b class="bad">false</b>。</p><p>T2 入队，把 head 的 ws 设为 SIGNAL 后 park。</p>',
+          line: 14, set: { nodes: [H({ ws: -1 }), { id: 'n2', th: 'T2', ws: 0, cls: 'accent' }], toks: { T2: { at: 'n2', cls: 'warn', s: 'park 挂起' } } }, hot: ['q'], moves: [['w', 'state', 'CAS ✗', 'bad']] },
+        { title: 'c()：再次重入，state = 3', desc: '<p>T1 第三次 lock，state 变为 3。重入不排队、不阻塞。</p><p class="warn">T2 继续 park。</p>',
+          line: [10, 11], set: { state: 3, stack: ['a', 'b', 'c'], nodes: [H({ ws: -1 }), { id: 'n2', th: 'T2', ws: 0 }] }, hot: ['state'], moves: [['owner', 'state', '+1', 'ok']] },
+        { title: 'c() finally unlock：3 → 2', desc: '<p><code>tryRelease</code>：c = 2 ≠ 0，<code>free = false</code>，owner 仍是 T1。</p><p><code>release</code> 返回 false，<b>不会唤醒</b> T2。</p>',
+          line: [16, 17, 22, 23], set: { state: 2, stack: ['a', 'b'] }, hot: ['state'], moves: [['state', 'owner', '-1', 'accent']] },
+        { title: 'b() finally unlock：2 → 1', desc: '<p>state 减为 1，锁依然属于 T1。</p>',
+          line: [16, 22, 23], set: { state: 1, stack: ['a'] }, hot: ['state'], moves: [['state', 'owner', '-1', 'accent']] },
+        { title: 'a() finally unlock：1 → 0，真正释放', desc: '<p>c = 0：<code>free = true</code>，<code>setExclusiveOwnerThread(null)</code>，<code>setState(0)</code>。</p><p><code>release</code> 发现 head.ws ≠ 0，调用 <code>unparkSuccessor</code> 唤醒 T2。</p>',
+          line: [16, 18, 19, 20, 22, 23], set: { state: 0, owner: null, stack: [], nodes: [H({ ws: 0, cls: 'accent' }), { id: 'n2', th: 'T2', ws: 0 }], toks: { T1: { at: 'e0', cls: 'soft', s: '已释放' }, T2: { cls: 'accent', s: '被唤醒' } } }, hot: ['state', 'owner'], moves: [['h', 'T2', 'unpark', 'accent']] },
+        { title: 'T2：获取锁', desc: '<p>T2 醒来，前驱是 head，CAS state 0 → 1 成功，owner = T2，T2 节点成为新 head。</p><p class="ok">lock 3 次、unlock 3 次，state 回到 0，T2 才能拿到锁。</p>',
+          line: [3, 4, 5], set: { state: 1, owner: 'T2', nodes: [{ id: 'n2', th: null, ws: 0, cls: 'ok' }], toks: { T2: { at: 'owner', cls: 'ok', s: '持有锁' } }, result: 'lock 了 N 次就要 unlock N 次，减到 0 才真正释放', resultCls: 'c-ok' }, hot: ['state', 'owner'], moves: [['n2', 'state', 'CAS 0→1', 'ok']] },
+        { title: '反例：c() 漏掉一次 unlock', desc: '<p>假设 <code>c()</code> 没有把 unlock 放在 finally 里，抛异常时跳过了。</p><p class="bad">a()、b() 都 unlock 后 state 仍是 1，owner 仍是 T1。T1 已经不在任何加锁方法里，但锁永远不会释放，T2 一直 park。</p>',
+          line: [18, 22], badLine: [16],
+          state: { side: 'T1 的调用栈', title: 'ReentrantLock（非公平）', state: 1, owner: 'T1', stack: [], left: [], nodes: [H({ ws: -1 }), { id: 'n2', th: 'T2', ws: 0, cls: 'bad' }],
+            toks: { T1: { at: 'e0', cls: 'bad', s: '方法已返回' }, T2: { at: 'n2', cls: 'warn', s: '永远 park' } }, result: '少 unlock 一次：state 停在 1，T2 永远等不到锁', resultCls: 'c-bad' },
+          hot: ['state', 'owner'], dwell: 3800 },
+      ],
+    },
+    {
+      label: '非公平锁：新线程插队',
+      state: SQ('ReentrantLock（非公平，默认）'),
+      code: [
+        '// NonfairSync.lock()',
+        'if (compareAndSetState(0, 1)) // 抢',
+        '  setExclusiveOwnerThread(cur);',
+        'else',
+        '  acquire(1);',
+        '// 被唤醒的 T2：acquireQueued 循环',
+        'if (p == head && tryAcquire(1)) ...',
+        '// nonfairTryAcquire',
+        'if (c == 0 &&',
+        '    compareAndSetState(0, acq))',
+        '  ...  // 不看队列',
+        '// 失败：重新设置 SIGNAL 后 park',
+        'shouldParkAfterFailedAcquire(p, n);',
+        'parkAndCheckInterrupt();',
+      ],
+      steps: [
+        { title: '初始：T1 持锁，T2 排队', desc: '<p>T1 持有锁，T2 在队列中 park。新线程 T3 马上要调用 <code>lock()</code>。</p>' },
+        { title: 'T1 unlock，唤醒 T2', desc: '<p>state 1 → 0，owner = null，<code>unparkSuccessor</code> 唤醒 T2。</p><p class="warn">T2 从被唤醒到真正被 CPU 调度运行需要时间，这段时间锁是空闲的。</p>',
+          set: { state: 0, owner: null, nodes: [H({ ws: 0, cls: 'accent' }), { id: 'n2', th: 'T2', ws: 0 }], toks: { T1: { at: 'e1', cls: 'soft', s: '已释放' }, T2: { cls: 'accent', s: '唤醒中…' } } }, hot: ['state', 'owner'], moves: [['h', 'T2', 'unpark', 'accent']] },
+        { title: 'T3 到达：直接 CAS，插队成功', desc: '<p><code>NonfairSync.lock()</code> 第一件事就是 <code>compareAndSetState(0, 1)</code>，<b>不看队列</b>。</p><p>此时 state 恰好是 0，T3 抢锁成功，owner = T3。</p>',
+          line: [2, 3], set: { state: 1, owner: 'T3', left: [['lock()：直接 CAS(0, 1)', ''], ['不检查有没有人排队', 'c-warn'], ['→ 插队成功', 'c-ok']], toks: { T3: { at: 'owner', cls: 'ok', s: '插队成功' } } }, hot: ['state', 'owner'], moves: [['e0', 'state', 'CAS 0→1', 'ok']] },
+        { title: 'T2 醒来：tryAcquire 失败', desc: '<p>T2 终于运行，前驱是 head，调用 <code>tryAcquire</code>：state = 1，owner 是 T3，返回 <b class="bad">false</b>。</p>',
+          line: [7, 9, 10], set: { nodes: [H({ ws: 0 }), { id: 'n2', th: 'T2', ws: 0, cls: 'bad' }], toks: { T2: { cls: 'bad', s: 'tryAcquire ✗' } } }, moves: [['T2', 'state', 'tryAcquire ✗', 'bad']] },
+        { title: 'T2 再次 park', desc: '<p>head 的 ws 在 unparkSuccessor 中被改回了 0，<code>shouldParkAfterFailedAcquire</code> 重新设为 SIGNAL，下一轮仍失败，T2 再次 park。</p>',
+          line: [13, 14], set: { nodes: [H({ ws: -1, cls: 'warn' }), { id: 'n2', th: 'T2', ws: 0 }], toks: { T2: { cls: 'warn', s: '再次 park' } } } },
+        { title: '结论：吞吐高，但可能饥饿', desc: '<p>非公平锁利用了"唤醒延迟"中锁空闲的时间，减少线程切换，<b class="ok">吞吐量更高</b>，所以是 ReentrantLock 的默认实现。</p><p class="warn">代价：队列中的线程可能被反复插队，甚至饥饿。</p>',
+          set: { result: '非公平：新来的 T3 先拿到锁，排队的 T2 继续等', resultCls: 'c-warn' }, dwell: 3600 },
+      ],
+    },
+    {
+      label: '公平锁：hasQueuedPredecessors',
+      state: SQ('ReentrantLock（公平）'),
+      code: [
+        '// FairSync.lock()',
+        'acquire(1);  // 不先 CAS',
+        '// FairSync.tryAcquire',
+        'int c = getState();',
+        'if (c == 0) {',
+        '  if (!hasQueuedPredecessors() &&',
+        '      compareAndSetState(0, acq)) {',
+        '    setExclusiveOwnerThread(cur);',
+        '    return true;',
+        '  }',
+        '} else if (重入) { ... }',
+        'return false;',
+        '// hasQueuedPredecessors',
+        'Node t = tail, h = head, s;',
+        'return h != t &&',
+        '  ((s = h.next) == null ||',
+        '   s.thread != currentThread());',
+      ],
+      steps: [
+        { title: '初始：T1 持锁，T2 排队', desc: '<p><code>new ReentrantLock(true)</code> 创建公平锁。T1 持有锁，T2 在队列中 park，新线程 T3 马上要调用 <code>lock()</code>。</p>' },
+        { title: 'T1 unlock，唤醒 T2', desc: '<p>state 1 → 0，owner = null，唤醒 T2。T2 正在被调度的路上，锁暂时空闲。</p>',
+          set: { state: 0, owner: null, nodes: [H({ ws: 0, cls: 'accent' }), { id: 'n2', th: 'T2', ws: 0 }], toks: { T1: { at: 'e1', cls: 'soft', s: '已释放' }, T2: { cls: 'accent', s: '唤醒中…' } } }, hot: ['state', 'owner'], moves: [['h', 'T2', 'unpark', 'accent']] },
+        { title: 'T3 到达：先检查有没有人排队', desc: '<p><code>FairSync.lock()</code> 不先 CAS，直接 <code>acquire(1)</code>。</p><p><code>tryAcquire</code> 中虽然 state == 0，但 <code>hasQueuedPredecessors()</code>：head ≠ tail，且 <code>head.next</code> 的线程是 T2 不是自己 → 返回 <b>true</b>，T3 <b class="bad">不抢</b>。</p>',
+          line: [2, 5, 6, 15, 16, 17], set: { left: [['lock()：acquire(1)', ''], ['hasQueuedPredecessors()', ''], ['→ true，有人在排队', 'c-warn'], ['→ 不 CAS，去排队', 'c-bad']], toks: { T3: { cls: 'bad', s: '有人排队' } } }, moves: [['e0', 'h', '检查队列', 'warn']] },
+        { title: 'T3 入队，排在 T2 后面', desc: '<p>T3 封装成节点接到队尾，把 T2 节点的 ws 设为 SIGNAL，然后 park。</p>',
+          line: 12, set: { nodes: [H({ ws: 0 }), { id: 'n2', th: 'T2', ws: -1 }, { id: 'n3', th: 'T3', ws: 0, cls: 'accent' }], toks: { T3: { at: 'n3', cls: 'warn', s: 'park 挂起' } } }, hot: ['q'] },
+        { title: 'T2 醒来：没有前驱，CAS 成功', desc: '<p>T2 调用 <code>tryAcquire</code>：state == 0；<code>hasQueuedPredecessors()</code> 发现 <code>head.next</code> 就是自己，返回 false，于是 CAS 0 → 1 成功。</p>',
+          line: [5, 6, 7, 8, 9], set: { state: 1, owner: 'T2', nodes: [H({ ws: 0 }), { id: 'n2', th: 'T2', ws: -1, cls: 'ok' }, { id: 'n3', th: 'T3', ws: 0 }], toks: { T2: { cls: 'ok', s: 'CAS 成功' } } }, hot: ['state', 'owner'], moves: [['T2', 'state', 'CAS 0→1', 'ok']] },
+        { title: 'setHead：T2 持锁，T3 排第一', desc: '<p>T2 节点成为新 head，T2 持有锁。T3 现在是 <code>head.next</code>，下一个就轮到它。</p>',
+          set: { nodes: [{ id: 'n2', th: null, ws: -1, cls: 'ok' }, { id: 'n3', th: 'T3', ws: 0 }], toks: { T2: { at: 'owner', cls: 'ok', s: '持有锁' } } }, hot: ['q', 'owner'] },
+        { title: '结论：严格 FIFO', desc: '<p>公平锁按排队顺序获取，<b class="ok">不会饥饿</b>。</p><p class="warn">代价：新线程即使碰到锁空闲也必须排队、park、再被唤醒，线程切换更多，吞吐量低于非公平锁。</p>',
+          set: { result: '公平：先排队的 T2 拿到锁，T3 按顺序等待', resultCls: 'c-ok' }, dwell: 3600 },
+      ],
+    },
+  ];
+
+  let E;
+  const nodeIdx = (st, id) => st.nodes.findIndex(n => n.id === id);
+  function tokPos(st, at) {
+    if (POS[at]) return POS[at];
+    const k = nodeIdx(st, at);
+    return k >= 0 ? { x: NX(k) + NW / 2, y: TY } : POS.w;
+  }
+  function pt(st, key, prev) {
+    if (key === 'state') return { x: 530, y: 66 };
+    if (POS[key]) return POS[key];
+    if (st.toks[key]) { const q = tokPos(prev || st, (prev || st).toks[key].at); return { x: q.x, y: q.y - 24 }; }
+    const k = nodeIdx(st, key);
+    return k >= 0 ? { x: NX(k) + NW / 2, y: NY + 46 } : POS.w;
+  }
+
+  function makeNode(id) {
+    const g = svg('g', { class: 'anim hide' }, E.nodeLayer);
+    const r = svg('rect', { x: 0, y: 0, width: NW, height: NH, rx: 8, class: 'box anim' }, g);
+    const t1 = svg('text', { x: 10, y: 22, class: 'title' }, g, '');
+    const t2 = svg('text', { x: 10, y: 45, class: 'mono' }, g, '');
+    const t3 = svg('text', { x: 10, y: 66, class: 'mono' }, g, '');
+    const t4 = svg('text', { x: 10, y: 84, class: 'small muted' }, g, '');
+    return (E.nodes[id] = { g, r, t1, t2, t3, t4, fresh: true });
+  }
+
+  Player({
+    scenarios,
+    dwell: 2900,
+    init(g, ctx) {
+      const names = ctx.scenario === 0 ? ['T1', 'T2'] : ['T1', 'T2', 'T3'];
+      E = { nodes: {}, frames: {}, toks: {}, prev: null };
+      // 左侧
+      svg('rect', { x: 16, y: 12, width: 220, height: 370, rx: 10, class: 'box soft' }, g);
+      E.side = svg('text', { x: 30, y: 36, class: 'title' }, g, '');
+      E.frameLayer = svg('g', {}, g);
+      E.left = svg('g', {}, g);
+      // AQS
+      svg('rect', { x: 252, y: 12, width: 492, height: 128, rx: 10, class: 'box soft' }, g);
+      E.title = svg('text', { x: 266, y: 36, class: 'title' }, g, '');
+      E.hlState = svg('rect', { x: 262, y: 48, width: 252, height: 36, rx: 6, class: 'hl anim hide' }, g);
+      E.hlOwner = svg('rect', { x: 262, y: 94, width: 252, height: 30, rx: 6, class: 'hl anim hide' }, g);
+      svg('text', { x: 272, y: 72, class: 'mono' }, g, 'state =');
+      E.state = svg('text', { x: 336, y: 75, class: 'big' }, g, '');
+      E.pips = [0, 1, 2].map(k => svg('circle', { cx: 386 + k * 24, cy: 66, r: 8, class: 'pip anim off' }, g));
+      svg('text', { x: 462, y: 71, class: 'small muted' }, g, '重入层数');
+      E.ownerL = svg('text', { x: 272, y: 114, class: 'mono' }, g, '');
+      svg('text', { x: 664, y: 36, 'text-anchor': 'middle', class: 'small muted' }, g, '持有锁的线程');
+      svg('rect', { x: 624, y: 50, width: 80, height: 40, rx: 8, class: 'box dashed' }, g);
+      // 队列
+      E.qBox = svg('rect', { x: 252, y: 156, width: 492, height: 226, rx: 10, class: 'box soft anim' }, g);
+      svg('text', { x: 266, y: 180, class: 'title' }, g, '等待队列');
+      E.links = svg('g', {}, g);
+      E.nodeLayer = svg('g', {}, g);
+      E.empty = svg('text', { x: 498, y: 272, 'text-anchor': 'middle', class: 'mono muted' }, g, 'head = tail = null');
+      for (const name of names) {
+        const tg = svg('g', { class: 'anim' }, g);
+        const r = svg('rect', { x: -30, y: -13, width: 60, height: 26, rx: 13, class: 'box anim' }, tg);
+        svg('text', { x: 0, y: 5, 'text-anchor': 'middle', class: 'mono title' }, tg, name);
+        const s = svg('text', { x: 0, y: 30, 'text-anchor': 'middle', class: 'small' }, tg, '');
+        E.toks[name] = { g: tg, r, s };
+      }
+      E.result = svg('text', { x: 380, y: 414, 'text-anchor': 'middle', class: 'title' }, g, '');
+    },
+    render(st, step, i, ctx) {
+      const hot = step.hot || [];
+      E.side.textContent = st.side;
+      E.title.textContent = st.title;
+      E.state.textContent = st.state;
+      E.state.setAttribute('class', 'big' + (st.state ? ' c-ok' : ''));
+      E.pips.forEach((p, k) => p.setAttribute('class', 'pip anim' + (k < st.state ? '' : ' off')));
+      E.ownerL.textContent = 'exclusiveOwnerThread = ' + (st.owner || 'null');
+      E.hlState.classList.toggle('hide', !hot.includes('state'));
+      E.hlOwner.classList.toggle('hide', !hot.includes('owner'));
+      E.qBox.setAttribute('class', 'box soft anim' + (hot.includes('q') ? ' accent' : ''));
+
+      // 调用栈帧：从下往上堆
+      const live = new Set(st.stack);
+      st.stack.forEach((name, k) => {
+        let F = E.frames[name];
+        const y = 326 - k * 50;
+        if (!F) {
+          const fg = svg('g', { class: 'anim hide' }, E.frameLayer);
+          const r = svg('rect', { x: 0, y: 0, width: 196, height: 40, rx: 6, class: 'box anim ok' }, fg);
+          svg('text', { x: 12, y: 25, class: 'mono' }, fg, `${name}() { lock.lock();`);
+          F = E.frames[name] = { g: fg, r };
+        }
+        if (F.g.classList.contains('hide')) {
+          F.g.style.transition = 'none'; move(F.g, 28, y - 40); F.g.getBoundingClientRect(); F.g.style.transition = '';
+        }
+        F.g.classList.remove('hide');
+        move(F.g, 28, y);
+        F.r.setAttribute('class', 'box anim ' + (k === st.stack.length - 1 ? 'accent' : 'ok'));
+      });
+      for (const name in E.frames) if (!live.has(name) && !E.frames[name].g.classList.contains('hide')) {
+        const F = E.frames[name];
+        F.g.classList.add('hide');
+        F.g.style.transform = F.g.style.transform.replace(/,\s*([\d.]+)px\)/, (m, y) => `, ${+y - 40}px)`);
+      }
+
+      // 左侧说明行
+      while (E.left.firstChild) E.left.removeChild(E.left.firstChild);
+      const LL = svg('g', { class: 'late' }, E.left);
+      (st.left || []).forEach(([t, cls], k) => svg('text', { x: 30, y: 214 + k * 26, class: cls }, LL, t));
+
+      // 节点
+      const liveN = new Set(st.nodes.map(n => n.id));
+      st.nodes.forEach((n, k) => {
+        const N = E.nodes[n.id] || makeNode(n.id);
+        N.r.setAttribute('class', 'box anim ' + (n.cls || ''));
+        N.t1.textContent = k === 0 ? 'head（哑节点）' : 'Node';
+        N.t2.textContent = 'thread = ' + (n.th || 'null');
+        N.t3.textContent = 'ws = ' + n.ws;
+        N.t3.setAttribute('class', 'mono' + (n.ws === -1 ? ' c-warn' : ''));
+        N.t4.textContent = WSN[n.ws] || '';
+        if (N.fresh || N.g.classList.contains('hide')) {
+          N.g.style.transition = 'none'; move(N.g, NX(k) + 60, NY); N.g.getBoundingClientRect(); N.g.style.transition = '';
+          N.fresh = false;
+        }
+        N.g.classList.remove('hide');
+        move(N.g, NX(k), NY);
+      });
+      for (const id in E.nodes) if (!liveN.has(id) && !E.nodes[id].g.classList.contains('hide')) {
+        const N = E.nodes[id];
+        N.g.classList.add('hide');
+        N.g.style.transform = N.g.style.transform.replace(/,\s*[\d.]+px\)/, `, ${NY + 40}px)`);
+      }
+      E.empty.classList.toggle('hide', st.nodes.length > 0);
+      while (E.links.firstChild) E.links.removeChild(E.links.firstChild);
+      const L = svg('g', { class: 'late' }, E.links);
+      const n = st.nodes.length;
+      for (let k = 0; k + 1 < n; k++) {
+        arrow(L, NX(k) + NW + 1, NY + 32, NX(k + 1) - 2, NY + 32, 'accent');
+        arrow(L, NX(k + 1) - 1, NY + 60, NX(k) + NW + 2, NY + 60, 'accent');
+      }
+      if (n) {
+        svg('text', { x: NX(0) + 32, y: NY - 8, 'text-anchor': 'middle', class: 'mono small c-accent' }, L, 'head ↓');
+        svg('text', { x: NX(n - 1) + NW - 32, y: NY - 8, 'text-anchor': 'middle', class: 'mono small c-violet' }, L, 'tail ↓');
+      }
+
+      // 线程
+      for (const name in E.toks) {
+        const t = st.toks[name], T = E.toks[name];
+        const p = tokPos(st, t.at);
+        move(T.g, p.x, p.y);
+        T.r.setAttribute('class', 'box anim ' + (t.cls || ''));
+        T.s.textContent = t.s || '';
+        T.s.setAttribute('class', 'small ' + (t.cls && t.cls !== 'soft' ? 'c-' + t.cls : 'muted'));
+      }
+
+      E.result.textContent = st.result || '';
+      E.result.setAttribute('class', 'title ' + (st.resultCls || ''));
+      const prev = E.prev && E.prev.sc === ctx.scenario ? E.prev.st : st;
+      for (const [from, to, label, cls] of step.moves || []) packet(ctx.fx, pt(st, from, prev), pt(st, to, st), label, cls);
+      E.prev = { sc: ctx.scenario, st };
+    },
+  });
+})();
+</script>
+</body>
+</html>

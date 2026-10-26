@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kafka 高低水位</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .stage .mk-hw { stroke: var(--ok); stroke-width: 2.5; }
+  .stage .mk-leo { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 4 3; }
+  .stage .mk-start { stroke: var(--violet); stroke-width: 2; }
+  .stage .fade-out { transition: opacity .5s ease; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Kafka · 1 · Watermark</p>
+    <h1>高水位 HW 与低水位 LW：消费者能读到哪里</h1>
+    <p class="lede">每个副本都有自己的 LEO（下一条消息要写入的 offset）。Leader 把 ISR 中所有副本 LEO 的最小值作为高水位 HW，HW 之前的消息才算"已提交"，消费者只能读到这里。低水位 LW 是各副本 logStartOffset 的最小值，LW 之前的消息已被删除。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>一个分区：1 个 Leader + 2 个 Follower</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--ok)"></i>已提交（&lt; HW，可消费）</span>
+            <span><i class="sw" style="background:var(--warn)"></i>未提交（HW ~ LEO）</span>
+            <span><i class="sw" style="background:var(--accent)"></i>LEO</span>
+            <span><i class="sw" style="background:var(--violet)"></i>logStartOffset</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 496" role="img" aria-label="Leader 与两个 Follower 的日志、LEO、HW 和 logStartOffset 随生产、同步、删除而移动"></svg>
+        <p class="cap">格子里的数字是消息的 offset。动画是示意：真实 Follower 是持续批量 fetch，这里按"一轮一轮"拆开展示。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>代码</h2></div>
+        <pre class="code" id="code"></pre>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>概念</th><th>定义</th><th>作用</th></tr></thead>
+        <tbody>
+          <tr><td><code>LEO</code></td><td>副本中下一条待写入消息的 offset（最后一条 offset + 1）</td><td>每个副本各有一个，表示写到了哪里</td></tr>
+          <tr><td><code>HW</code></td><td>ISR 中所有副本 LEO 的最小值</td><td>HW 之前的消息才算已提交，消费者只能拉到 HW 之前，Leader 切换后这些数据依然存在</td></tr>
+          <tr><td><code>LW</code></td><td>AR 中所有副本 logStartOffset 的最小值</td><td>日志起点，更早的消息已被日志清理或 <code>DeleteRecords</code> 删除，不能再消费</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul style="margin-top:10px">
+      <li>Leader 根据 Follower fetch 请求里的 offset 得知它的 LEO，再更新 HW；Follower 要在<b>下一次</b> fetch 响应中才拿到新的 HW，有一轮延迟。</li>
+      <li>只靠 HW 截断日志可能导致数据丢失或副本不一致，所以 0.11 引入了 <b>Leader Epoch</b> 来决定截断位置。</li>
+      <li>Follower 落后超过 <code>replica.lag.time.max.ms</code> 会被移出 ISR，HW 不再等它；追上后重新加入。</li>
+      <li>生产者 <code>acks=all</code> + <code>min.insync.replicas &gt;= 2</code>，才能保证消息写入 ISR 后不丢；ISR 不足时写入报 <code>NotEnoughReplicas</code>。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet, move } = Player;
+  const N = 12, CX = 176, CW = 40, GAP = 46;
+  const TOP = r => 82 + r * 120;
+  const bx = n => CX + n * GAP - 3;
+  const NAMES = ['Leader · Broker 1', 'Follower · Broker 2', 'Follower · Broker 3'];
+  const SHORT = ['B1', 'B2', 'B3'];
+
+  // 包裹的起点 / 终点: prod、cons、q0..q2 (日志左侧的竖向通道)、c<行>:<offset> (某个格子)
+  function pt(s) {
+    if (s === 'prod') return { x: 166, y: 40 };
+    if (s === 'cons') return { x: 594, y: 40 };
+    if (s[0] === 'q') return { x: 156, y: TOP(+s[1]) + 52 };
+    const [r, n] = s.slice(1).split(':').map(Number);
+    return { x: CX + n * GAP + CW / 2, y: TOP(r) + 51 };
+  }
+
+  const rep = (...v) => [0, 1, 2].map(k => ({ leo: v[k * 3], hw: v[k * 3 + 1], start: v[k * 3 + 2] }));
+
+  const S1 = { rep: rep(3, 3, 0, 3, 3, 0, 3, 3, 0), remote: [3, 3], isr: [1, 1, 1], down: [0, 0, 0], prod: '空闲', cons: { got: '尚未拉取' }, result: '' };
+  const S2 = { rep: rep(5, 5, 0, 5, 5, 0, 5, 5, 0), remote: [5, 5], isr: [1, 1, 1], down: [0, 0, 0], prod: '空闲', cons: { got: '正常消费中' }, result: '' };
+
+  const scenarios = [
+    {
+      label: 'HW 推进与 LW 移动',
+      code: [
+        'LEO = 最后一条 offset + 1',
+        'HW  = min(ISR 中各副本的 LEO)',
+        'LW  = min(AR 的 logStartOffset)',
+        '消费者可读: LW <= offset < HW',
+        '',
+        '# 生产者',
+        'acks=all',
+      ],
+      state: S1,
+      steps: [
+        { title: '初始状态', line: [1, 2],
+          desc: '<p>三个副本都有 offset 0~2，所以 <code>LEO = 3</code>。</p><p>ISR = {B1, B2, B3} 全部同步，<code>HW = min(3, 3, 3) = 3</code>，0~2 都是<b class="ok">已提交</b>。</p>' },
+        { title: '消费者读取 0~2', line: 4,
+          desc: '<p>消费者向 Leader 拉取，<code>0 ≤ offset &lt; HW</code> 的消息都能读到。</p><p>下一次从 offset 3 开始拉。</p>',
+          set: { cons: { got: '读到 0, 1, 2' } }, hot: { cons: 'ok' }, moves: [['c0:1', 'cons', '0~2', 'ok']] },
+        { title: '生产者写入 3、4', line: [1, 7],
+          desc: '<p>消息先写入 Leader，Leader 的 <code>LEO</code> 变成 5。</p><p class="warn">Follower 还没同步，HW 仍是 3，所以 3、4 是<b>未提交</b>消息。<code>acks=all</code> 的生产者还在等待确认。</p>',
+          set: { rep: rep(5, 3, 0, 3, 3, 0, 3, 3, 0), prod: '等待 ack' }, hot: { prod: 'warn', r0: 'accent' },
+          moves: [['prod', 'c0:3', '3', 'warn'], ['prod', 'c0:4', '4', 'warn', 250]] },
+        { title: '消费者拉不到 3、4', line: 4,
+          desc: '<p>消费者请求 <code>fetch offset=3</code>，但 3 ≥ HW，Leader 返回空。</p><p>如果这时就让消费者读到 3、4，Leader 一旦宕机，新 Leader 上可能根本没有这两条，消费者就读到了"不存在"的数据。</p>',
+          set: { cons: { got: '3、4 未提交，返回空' } }, hot: { cons: 'warn' },
+          moves: [['cons', 'c0:5', 'fetch@3', 'accent'], ['c0:5', 'cons', '空', 'warn', 900]] },
+        { title: 'Follower 第一轮 fetch', line: 2,
+          desc: '<p>两个 Follower 都发 <code>fetch offset=3</code>。Leader 据此记下：B2、B3 的 LEO 都是 3，HW 仍为 <code>min(5, 3, 3) = 3</code>。</p><p>B2 拉到 3、4（LEO=5）；B3 这一轮只拉到 3（LEO=4）。响应里带的 HW 都是 3。</p>',
+          set: { rep: rep(5, 3, 0, 5, 3, 0, 4, 3, 0) }, hot: { r1: 'accent', r2: 'accent' },
+          moves: [['q1', 'q0', 'fetch@3', 'accent'], ['q2', 'q0', 'fetch@3', 'accent'],
+                  ['c0:3', 'c1:3', '3,4 HW=3', 'warn', 900], ['c0:7', 'c2:3', '3 HW=3', 'warn', 900]] },
+        { title: '第二轮 fetch：Leader HW = 4', line: 2,
+          desc: '<p>B2 发 <code>fetch@5</code>、B3 发 <code>fetch@4</code>，Leader 记下它们的 LEO 为 5、4，HW 更新为 <code>min(5, 5, 4) = 4</code>，3 变为已提交。</p><p>B3 这一轮拉到 4，LEO 也到了 5。但两个 Follower 收到的 HW 还是旧的 3。</p>',
+          set: { rep: rep(5, 4, 0, 5, 3, 0, 5, 3, 0), remote: [5, 4] }, hot: { r0: 'ok' },
+          moves: [['q1', 'q0', 'fetch@5', 'accent'], ['q2', 'q0', 'fetch@4', 'accent'], ['c0:4', 'c2:4', '4 HW=3', 'warn', 900]] },
+        { title: '消费者读到 3', line: 4,
+          desc: '<p>HW 已经到 4，消费者再拉 <code>fetch@3</code> 就能读到 3。4 还要等 HW 继续前进。</p>',
+          set: { cons: { got: '读到 3' } }, hot: { cons: 'ok' },
+          moves: [['cons', 'c0:5', 'fetch@3', 'accent'], ['c0:3', 'cons', '3', 'ok', 900]] },
+        { title: '第三轮 fetch：HW = 5，ack 返回', line: [2, 7],
+          desc: '<p>两个 Follower 都发 <code>fetch@5</code>，Leader HW 更新为 <code>min(5, 5, 5) = 5</code>，3、4 全部提交，<code>acks=all</code> 的生产者收到确认。</p><p>这轮响应里带的 HW=4，Follower 把自己的 HW 更新到 4。</p>',
+          set: { rep: rep(5, 5, 0, 5, 4, 0, 5, 4, 0), remote: [5, 5], prod: 'ack 成功' }, hot: { prod: 'ok', r0: 'ok' },
+          moves: [['q1', 'q0', 'fetch@5', 'accent'], ['q2', 'q0', 'fetch@5', 'accent'], ['c0:4', 'prod', 'ack', 'ok', 900]] },
+        { title: 'Follower 晚一轮拿到 HW=5', line: 2,
+          desc: '<p>下一次 fetch 响应才把 HW=5 带给 Follower。<b>Follower 的 HW 总是比 Leader 晚一轮。</b></p><p>如果此时切换 Leader，只按 HW 截断就可能丢数据或不一致，所以 0.11 引入了 <code>Leader Epoch</code>。</p><p>消费者现在也能读到 4。</p>',
+          set: { rep: rep(5, 5, 0, 5, 5, 0, 5, 5, 0), cons: { got: '读到 4' } }, hot: { r1: 'ok', r2: 'ok', cons: 'ok' },
+          moves: [['c0:6', 'c1:6', 'HW=5', 'ok'], ['c0:6', 'c2:6', 'HW=5', 'ok'], ['c0:4', 'cons', '4', 'ok', 500]] },
+        { title: '删除旧消息：Leader 的起点变为 2', line: 3,
+          desc: '<p>以 <code>DeleteRecords(offset=2)</code> 为例（保留时间 / 大小到期删除旧 segment 也一样）：Leader 删掉 0、1，<code>logStartOffset = 2</code>。</p><p>Follower 还没删，<code>LW = min(2, 0, 0) = 0</code>。</p>',
+          set: { rep: rep(5, 5, 2, 5, 5, 0, 5, 5, 0) }, hot: { r0: 'violet' } },
+        { title: 'Follower 同步起点，LW = 2', line: 3,
+          desc: '<p>fetch 响应里带有 Leader 的 <code>logStartOffset</code>，Follower 也删除 0、1。</p><p><code>LW = min(2, 2, 2) = 2</code>，<code>DeleteRecords</code> 等到 LW 达到 2 才返回成功。</p>',
+          set: { rep: rep(5, 5, 2, 5, 5, 2, 5, 5, 2) }, hot: { r1: 'violet', r2: 'violet' },
+          moves: [['c0:2', 'c1:2', 'start=2', 'violet'], ['c0:2', 'c2:2', 'start=2', 'violet']] },
+        { title: '低于 LW 的 offset 已不可消费', line: 4,
+          desc: '<p>如果另一个消费组的位移还停在 0，它请求 <code>fetch@0</code> 会得到 <code>OFFSET_OUT_OF_RANGE</code>，再按 <code>auto.offset.reset</code> 重置（earliest 就从 LW=2 开始）。</p><p>可消费区间是 <b class="ok">[LW, HW) = [2, 5)</b>。</p>',
+          set: { cons: { got: 'fetch@0 越界' }, result: '可消费区间 [LW, HW) = [2, 5)；HW ~ LEO 之间是未提交消息', resultCls: 'c-ok' }, hot: { cons: 'bad' },
+          moves: [['cons', 'c0:2', 'fetch@0', 'bad'], ['c0:2', 'cons', 'OUT_OF_RANGE', 'bad', 900]], dwell: 3800 },
+      ],
+    },
+    {
+      label: 'Follower 掉出 ISR',
+      code: [
+        '# 生产者',
+        'acks=all',
+        '# Broker / Topic',
+        'min.insync.replicas=2',
+        'replica.lag.time.max.ms=30000',
+      ],
+      state: S2,
+      steps: [
+        { title: '初始：ISR 全部同步', line: [2, 4],
+          desc: '<p>三个副本 LEO 都是 5，<code>HW = 5</code>。</p><p>生产者 <code>acks=all</code>：消息写入 ISR 中所有副本后才返回成功；<code>min.insync.replicas=2</code>：ISR 至少要有 2 个副本才允许写入。</p>' },
+        { title: 'B3 卡住了', line: 5,
+          desc: '<p>B3 发生长时间 Full GC 或网络抖动，停止发送 fetch 请求，LEO 停在 5。</p>',
+          set: { down: [0, 0, 1] }, hot: { r2: 'bad' } },
+        { title: '写入 5、6，HW 被 B3 拖住', line: 2,
+          desc: '<p>Leader 写入 5、6，B2 正常同步，LEO 都到了 7。</p><p class="warn">B3 还在 ISR 中，<code>HW = min(7, 7, 5) = 5</code>，5、6 迟迟不能提交，生产者一直等 ack。</p>',
+          set: { rep: rep(7, 5, 0, 7, 5, 0, 5, 5, 0), remote: [7, 5], prod: '等待 ack' }, hot: { prod: 'warn', r2: 'bad' },
+          moves: [['prod', 'c0:5', '5', 'warn'], ['prod', 'c0:6', '6', 'warn', 250], ['c0:5', 'c1:5', '5,6', 'warn', 900]] },
+        { title: '超时，B3 被移出 ISR', line: 5,
+          desc: '<p>B3 超过 <code>replica.lag.time.max.ms</code>（默认 30 秒）没有追上 Leader，被移出 ISR。</p><p>ISR = {B1, B2}，<code>HW = min(7, 7) = 7</code>，5、6 提交，生产者收到 ack。</p>',
+          set: { rep: rep(7, 7, 0, 7, 5, 0, 5, 5, 0), isr: [1, 1, 0], prod: 'ack 成功' }, hot: { prod: 'ok', r0: 'ok' },
+          moves: [['c0:6', 'prod', 'ack', 'ok', 300]] },
+        { title: 'B2 也宕机，ISR 只剩 Leader', line: [4, 5],
+          desc: '<p>B2 在下一次 fetch 中拿到 HW=7，随后宕机，超时后同样被移出 ISR。</p><p>ISR = {B1}，只剩 1 个副本。</p>',
+          set: { rep: rep(7, 7, 0, 7, 7, 0, 5, 5, 0), isr: [1, 0, 0], down: [0, 1, 1] }, hot: { r1: 'bad' } },
+        { title: 'acks=all 写入被拒绝', line: [2, 4], badLine: 4,
+          desc: '<p>ISR 大小 1 &lt; <code>min.insync.replicas=2</code>，Leader 直接拒绝写入，返回 <code>NotEnoughReplicas</code>，生产者重试。</p><p>宁可暂时不可写，也不让消息只存在一个副本上。若用 <code>acks=1</code>，写入会成功，但 Leader 一挂就丢。</p>',
+          set: { prod: 'NotEnoughReplicas' }, hot: { prod: 'bad', r0: 'bad' },
+          moves: [['prod', 'c0:7', '7', 'accent'], ['c0:7', 'prod', 'NotEnoughReplicas', 'bad', 900]] },
+        { title: 'B3 恢复并追上，重新加入 ISR', line: 5,
+          desc: '<p>B3 恢复后 <code>fetch@5</code>，拉到 5、6，LEO 追到 7（不小于 HW）后重新加入 ISR。</p><p>ISR = {B1, B3}，满足 <code>min.insync.replicas=2</code>。</p>',
+          set: { rep: rep(7, 7, 0, 7, 7, 0, 7, 7, 0), isr: [1, 0, 1], down: [0, 1, 0], remote: [7, 7], prod: '可以写入' }, hot: { r2: 'ok' },
+          moves: [['q2', 'q0', 'fetch@5', 'accent'], ['c0:5', 'c2:5', '5,6 HW=7', 'ok', 900]] },
+        { title: '再次写入成功', line: [2, 4],
+          desc: '<p>重新写入 7，B3 同步后 <code>HW = min(8, 8) = 8</code>，生产者收到 ack。</p><p>B2 恢复后同样要先追上才能回到 ISR。</p>',
+          set: { rep: rep(8, 8, 0, 7, 7, 0, 8, 8, 0), remote: [7, 8], prod: 'ack 成功', result: 'HW 只等 ISR 中的副本；ISR 不足 min.insync.replicas 时 acks=all 写入失败', resultCls: 'c-ok' }, hot: { prod: 'ok', r0: 'ok' },
+          moves: [['prod', 'c0:7', '7', 'warn'], ['c0:7', 'c2:7', '7', 'warn', 700], ['c0:7', 'prod', 'ack', 'ok', 1500]], dwell: 3800 },
+      ],
+    },
+  ];
+
+  let E, tok = 0;
+  const later = (ms, fn) => { const t = tok; setTimeout(() => { if (t === tok) fn(); }, ms); };
+  function fly(fx, from, to, label, cls, delay) {
+    const go = () => {
+      const g = packet(fx, pt(from), pt(to), label, cls);
+      later(1250, () => { g.style.opacity = 0; });
+    };
+    delay ? later(delay, go) : go();
+  }
+
+  Player({
+    scenarios,
+    dwell: 3000,
+    init(g, ctx) {
+      E = { rows: [], boxes: {} };
+      // 生产者 / 消费者
+      E.boxes.prod = svg('rect', { x: 16, y: 8, width: 150, height: 64, rx: 8, class: 'box anim' }, g);
+      svg('text', { x: 28, y: 28, class: 'title' }, g, 'Producer');
+      svg('text', { x: 100, y: 28, class: 'mono small muted' }, g, 'acks=all');
+      E.prod = svg('text', { x: 28, y: 56, class: 'small' }, g, '');
+      E.boxes.cons = svg('rect', { x: 594, y: 8, width: 150, height: 64, rx: 8, class: 'box anim' }, g);
+      svg('text', { x: 606, y: 28, class: 'title' }, g, 'Consumer');
+      E.range = svg('text', { x: 606, y: 46, class: 'mono small c-ok' }, g, '');
+      E.cons = svg('text', { x: 606, y: 64, class: 'small' }, g, '');
+      E.isr = svg('text', { x: 380, y: 30, 'text-anchor': 'middle', class: 'title' }, g, '');
+      E.formula = svg('text', { x: 380, y: 56, 'text-anchor': 'middle', class: 'mono small c-ok' }, g, '');
+
+      for (let r = 0; r < 3; r++) {
+        const T = TOP(r), row = { cells: [] };
+        E.boxes['r' + r] = svg('rect', { x: 16, y: T, width: 136, height: 104, rx: 8, class: 'box anim' }, g);
+        svg('text', { x: 26, y: T + 22, class: 'title' }, g, NAMES[r].split(' · ')[0]);
+        svg('text', { x: 142, y: T + 22, 'text-anchor': 'end', class: 'small muted' }, g, NAMES[r].split(' · ')[1]);
+        row.status = svg('text', { x: 26, y: T + 46, class: 'small' }, g, '');
+        row.nums = svg('text', { x: 26, y: T + 68, class: 'mono small' }, g, '');
+        row.extra = svg('text', { x: 26, y: T + 90, class: 'mono small muted' }, g, '');
+        svg('rect', { x: 160, y: T, width: 584, height: 104, rx: 8, class: 'box soft' }, g);
+        for (let n = 0; n < N; n++) {
+          const x = CX + n * GAP;
+          const rect = svg('rect', { x, y: T + 34, width: CW, height: 34, rx: 4, class: 'box anim' }, g);
+          const t = svg('text', { x: x + CW / 2, y: T + 56, 'text-anchor': 'middle', class: 'mono anim' }, g, n);
+          row.cells.push({ rect, t });
+        }
+        // 标记: start (上方, 紫), HW (上方, 绿), LEO (下方, 蓝)
+        const mk = (cls, y1, y2, ty, tcls, tx = 0, anchor = 'middle') => {
+          const m = svg('g', { class: 'anim' }, g);
+          svg('line', { x1: 0, y1, x2: 0, y2, class: cls }, m);
+          const t = svg('text', { x: tx, y: ty, 'text-anchor': anchor, class: 'mono small ' + tcls }, m, '');
+          return { m, t };
+        };
+        row.start = mk('mk-start', T + 24, T + 76, T + 18, 'c-violet', 3, 'start');
+        row.leo = mk('mk-leo', T + 28, T + 84, T + 98, 'c-accent');
+        row.hw = mk('mk-hw', T + 24, T + 80, T + 18, 'c-ok');
+        E.rows.push(row);
+      }
+      E.lw = svg('text', { x: 380, y: 452, 'text-anchor': 'middle', class: 'mono small c-violet' }, g, '');
+      E.result = svg('text', { x: 380, y: 482, 'text-anchor': 'middle', class: 'title' }, g, '');
+    },
+    render(st, step, i, ctx) {
+      tok++;
+      const hot = step.hot || {};
+      const isrNames = SHORT.filter((_, r) => st.isr[r]);
+      E.isr.textContent = `ISR = {${isrNames.join(', ')}}`;
+      // Leader 视角: 自己的 LEO + ISR 中 Follower 上报的 LEO
+      const vals = [st.rep[0].leo].concat(st.remote.filter((_, k) => st.isr[k + 1]));
+      E.formula.textContent = `Leader 计算 HW = min(${vals.join(', ')}) = ${st.rep[0].hw}`;
+      const starts = st.rep.map(p => p.start), lw = Math.min(...starts);
+      E.lw.textContent = `LW = min(各副本 logStartOffset) = min(${starts.join(', ')}) = ${lw}`;
+      E.range.textContent = `可读 [${lw}, ${st.rep[0].hw})`;
+      E.prod.textContent = st.prod;
+      E.cons.textContent = st.cons.got;
+
+      st.rep.forEach((p, r) => {
+        const row = E.rows[r];
+        row.cells.forEach((c, n) => {
+          let cls = 'box anim ';
+          if (n >= p.leo) cls += 'dashed';
+          else if (n < p.start) cls += 'hide';
+          else if (n < p.hw) cls += 'ok';
+          else cls += 'warn';
+          c.rect.setAttribute('class', cls);
+          c.t.setAttribute('class', 'mono anim' + (n >= p.leo || n < p.start ? ' hide' : ''));
+        });
+        move(row.hw.m, bx(p.hw), 0); row.hw.t.textContent = `HW=${p.hw}`;
+        move(row.leo.m, bx(p.leo), 0); row.leo.t.textContent = `LEO=${p.leo}`;
+        move(row.start.m, bx(p.start), 0); row.start.t.textContent = `start=${p.start}`;
+        row.status.textContent = st.down[r] ? (st.isr[r] ? '卡住（仍在 ISR）' : '宕机 · 不在 ISR') : st.isr[r] ? '在 ISR 中' : '已移出 ISR';
+        row.status.setAttribute('class', 'small ' + (st.down[r] ? 'c-bad' : st.isr[r] ? 'c-ok' : 'c-warn'));
+        row.nums.textContent = `LEO=${p.leo}  HW=${p.hw}`;
+        row.extra.textContent = r === 0 ? `记录 B2=${st.remote[0]} B3=${st.remote[1]}` : `start=${p.start}`;
+        const base = st.down[r] ? 'bad' : st.isr[r] ? '' : 'warn dashed';
+        E.boxes['r' + r].setAttribute('class', 'box anim ' + (hot['r' + r] || base));
+      });
+      E.boxes.prod.setAttribute('class', 'box anim ' + (hot.prod || ''));
+      E.boxes.cons.setAttribute('class', 'box anim ' + (hot.cons || ''));
+      E.result.textContent = st.result || '';
+      E.result.setAttribute('class', 'title ' + (st.resultCls || ''));
+      for (const [from, to, label, cls, delay] of step.moves || []) fly(ctx.fx, from, to, label, cls, delay);
+    },
+  });
+})();
+</script>
+</body>
+</html>

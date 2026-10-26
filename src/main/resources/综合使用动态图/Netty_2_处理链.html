@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Netty 2 · 处理链（责任链与双向事件传播）</title>
+<link rel="stylesheet" href="common.css">
+<style>
+.netty-nav{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:13px}
+.netty-nav a,.sources a{color:var(--accent);text-underline-offset:3px}
+.netty-nav [aria-current]{font-weight:700;text-decoration-thickness:2px}
+.sources{display:flex;flex-wrap:wrap;gap:8px 20px;font-size:13px}
+.stage .mono{font-family:var(--f-mono);font-size:12px}
+.stage .small{font-size:11px}
+.stage .title{font-size:13px}
+.now .desc{overflow-wrap:anywhere}
+@media(max-width:420px){.wrap{padding:18px 10px 32px}.panel{padding:12px}.ctl{flex-wrap:wrap}.controls{padding:10px}.netty-nav{gap:6px 12px}}
+</style>
+</head>
+<body>
+<main class="wrap">
+<header>
+<p class="eyebrow">Netty · 2 / 8 · 怎么流转</p>
+<h1>处理链（责任链与双向事件传播）</h1>
+<p class="lede">Channel 表示连接，Pipeline 是该连接的处理链，Handler 实现处理逻辑，Context 表示 Handler 在链中的位置。入站从 Head 向 Tail 传播，出站反向查找；不匹配方向的 Handler 会被跳过。</p>
+</header>
+<nav class="netty-nav" aria-label="Netty 八个知识单元"><a href="Netty_1_线程模型.html">1. 线程模型</a>
+<a href="Netty_2_处理链.html" aria-current="page">2. 处理链</a>
+<a href="Netty_3_内存.html">3. 内存</a>
+<a href="Netty_4_编解码.html">4. 编解码</a>
+<a href="Netty_5_异步结果.html">5. 异步结果</a>
+<a href="Netty_6_连接生命周期.html">6. 连接生命周期</a>
+<a href="Netty_7_流量控制.html">7. 流量控制</a>
+<a href="Netty_8_传输层.html">8. 传输层</a></nav>
+<section class="controls" id="controls" aria-label="播放控制"></section>
+<div class="grid">
+<section class="panel stage">
+<div class="panel-h"><h2>运行过程与故障对照</h2><div class="legend"><span><i class="sw" style="background:var(--accent)"></i>当前处理</span><span><i class="sw" style="background:var(--warn)"></i>等待 / 压力</span><span><i class="sw" style="background:var(--bad)"></i>错误路径</span></div></div>
+<svg id="svg" viewBox="0 0 700 420" role="img" aria-label="处理链的状态与消息流转动态图"></svg>
+<p class="cap">教学示意，时间与容量不按真实比例。切换场景可对照正常流程与故障；方向键逐步查看，空格暂停或播放。</p>
+</section>
+<aside class="col">
+<section class="panel now" aria-live="polite"><span class="k" id="nowNo"></span><h3 id="nowTitle"></h3><div class="desc" id="nowDesc"></div></section>
+<section class="panel"><div class="panel-h"><h2>关键代码 / 场景片段</h2></div><pre class="code" id="code"></pre></section>
+<section class="panel"><div class="panel-h"><h2>步骤</h2></div><ol class="steps" id="stepList"></ol></section>
+</aside>
+</div>
+<section class="panel notes"><div class="panel-h"><h2>最小知识单元</h2></div><div class="tablewrap"><table><thead><tr><th>概念</th><th>落地边界</th></tr></thead><tbody><tr><td>Channel</td><td>连接与 I/O 操作入口，每条连接拥有 Pipeline。</td></tr>
+<tr><td>Pipeline / Handler</td><td>处理器的有序链 / 对事件与操作的具体处理。</td></tr>
+<tr><td>Context</td><td>当前 Handler 的位置与传播入口；ctx.write 与 channel.write 起点不同。</td></tr></tbody></table></div></section>
+<section class="panel notes"><div class="panel-h"><h2>常见问题与排查</h2></div><div class="tablewrap"><table><thead><tr><th>现象</th><th>先检查什么 / 如何处理</th></tr></thead><tbody><tr><td>后续 Handler 不执行</td><td>检查是否 fireChannelRead / out.add，以及 Handler 的方向和匹配消息类型。</td></tr>
+<tr><td>Encoder 没执行</td><td>检查添加位置、write 入口、消息类型；编码器应位于发起 ctx.write 的 Handler 前方。</td></tr>
+<tr><td>发送监听器不回调</td><td>检查自定义出站 Handler 是否转发或完成原 Promise。</td></tr>
+<tr><td>消息被提前释放</td><td>明确消费与转交的边界，尤其是 SimpleChannelInboundHandler 的自动释放。</td></tr></tbody></table></div></section>
+<section class="panel"><div class="panel-h"><h2>官方参考 · Netty 4.1</h2></div><div class="sources"><a href="https://netty.io/4.1/api/io/netty/channel/ChannelPipeline.html" target="_blank" rel="noopener noreferrer">Pipeline 传播规则</a>
+<a href="https://netty.io/4.1/api/io/netty/channel/SimpleChannelInboundHandler.html" target="_blank" rel="noopener noreferrer">SimpleChannelInboundHandler</a></div><p class="cap">代码为说明机制的局部片段；示例中的业务类型、线程池、编解码器和指标方法由应用提供，标明伪代码的部分不是完整实现。</p></section>
+</main>
+<script src="player.js"></script>
+<script>window.NETTY_PAGE = {"name":"处理链","mechanism":"责任链与双向事件传播","question":"怎么流转","lede":"Channel 表示连接，Pipeline 是该连接的处理链，Handler 实现处理逻辑，Context 表示 Handler 在链中的位置。入站从 Head 向 Tail 传播，出站反向查找；不匹配方向的 Handler 会被跳过。","nodes":[["Head","传输层适配"],["Decoder","Inbound"],["Encoder","Outbound"],["Business","Inbound"],["Audit","Outbound"],["Tail","入站链尾"]],"edges":[[0,1],[1,3],[3,5]],"scenarios":[{"label":"完整请求：入站正向 / 出站反向","code":["// 添加顺序就是链中的位置","p.addLast(\"decoder\", decoder);  // Inbound","p.addLast(\"encoder\", encoder);  // Outbound","p.addLast(\"business\", business);// Inbound","p.addLast(\"audit\", audit);      // Outbound","// Business Handler 内：","ctx.fireChannelRead(msg);        // 向后找 Inbound","ctx.writeAndFlush(response);     // 向前找 Outbound","ctx.channel().writeAndFlush(response); // 从 Tail 向前找","// 覆盖 outbound.write 时要继续转发：","ctx.write(msg, promise);         // 保留原 promise"],"state":{},"steps":[{"title":"链已建立","desc":"\u003cp>每条 Channel 都有自己的 Pipeline。Context 可访问 channel、pipeline、executor，并决定事件从哪里继续。图中方框顺序就是添加顺序。\u003c/p>","set":{"values":["待接收","待解码","等待出站","等待请求","等待出站","链尾"],"status":["accent","","","","",""]},"line":[2,3,4,5]},{"title":"入站先解码","desc":"\u003cp>socket 读出的 ByteBuf 从 Head 进入 Decoder。入站事件跳过只处理出站的 Encoder。\u003c/p>","set":{"values":["ByteBuf","解码成 Request","跳过","等待 Request","跳过","链尾"],"status":["","accent","","","",""]},"moves":[[0,1,"ByteBuf"]],"line":2},{"title":"业务消费或继续转发","desc":"\u003cp>Decoder 产出 Request，Business 处理它。消费后可以停止传播；想交给后续 Inbound，必须显式 fireChannelRead。\u003c/p>","set":{"values":["完成读取","已产出 Request","跳过","处理 Request","跳过","可接收后续事件"],"status":["","","","accent","",""]},"moves":[[1,3,"Request"]],"line":7},{"title":"从 Business 的 ctx 出站","desc":"\u003cp>ctx.writeAndFlush 从当前 Business 的前方开始找 Outbound：先到 Encoder，再到 Head。位于 Business 后方的 Audit 不会被经过。\u003c/p>","set":{"values":["准备写 socket","出站跳过","编码 Response","发起 ctx.write","未经过","未经过"],"status":["","","accent","","",""]},"edges":[[3,2,"accent"],[2,0,"accent"]],"moves":[[3,2,"Response"]],"line":8},{"title":"从 Channel 出站","desc":"\u003cp>channel.writeAndFlush 从 Tail 起步，先经过 Audit，再到 Encoder、Head。两种入口不同，是出站 Handler 漏执行的常见原因。\u003c/p>","set":{"values":["写 socket","出站跳过","编码字节","跳过","记录发送","从链尾起步"],"status":["","","","","accent",""]},"edges":[[5,4,"ok"],[4,2,"ok"],[2,0,"ok"]],"moves":[[5,4,"Response"],[4,2,"Response"]],"line":9}]},{"label":"故障对照：吞事件 / 丢 Promise","code":["// Inbound：只打印后返回会截断传播","public void channelRead(ChannelHandlerContext ctx, Object msg) {","  inspect(msg);                  // 示例检查逻辑","  ctx.fireChannelRead(msg);      // 继续交给下一站","}","// 若消费并丢弃 ByteBuf，应 release；不要转发后又 release","// Outbound：必须转发原 promise 或显式完成它","public void write(ChannelHandlerContext ctx,","                  Object msg, ChannelPromise promise) {","  ctx.write(msg, promise);","}","// 不继续转发时：释放消息，并 tryFailure / trySuccess","// 异常交给 exceptionCaught，记录后按协议决定关闭"],"state":{},"steps":[{"title":"错误：Decoder 吞掉事件","desc":"\u003cp>覆盖 channelRead 后只检查数据、不产出消息也不继续传播，Business 就收不到请求。若截留 ByteBuf，还必须负责释放。\u003c/p>","set":{"values":["已读取","只检查后返回","未执行","收不到请求","未执行","收不到事件"],"status":["","accent","","","",""]},"badLine":3},{"title":"修复：继续传播","desc":"\u003cp>适配器 Handler 用 fireChannelRead；ByteToMessageDecoder 则通常向 out 添加解码结果。已转移的引用不要再自行 release。\u003c/p>","set":{"values":["已读取","继续传播","入站跳过","收到请求","入站跳过","后续事件"],"status":["","","","accent","",""]},"moves":[[1,3,"msg"]],"line":4},{"title":"错误：拦截写但不完成 Promise","desc":"\u003cp>自定义 Outbound Handler 吞掉 write，且没有完成 Promise，调用方监听器会一直等待。不要偷偷改用无关联的新 Promise。\u003c/p>","set":{"values":["未写入","出站跳过","未编码","已发起","截留 write","已起步"],"status":["","","","","accent",""]},"edges":[[5,4,"bad"]],"badLine":[8,9]},{"title":"修复：转发原 Promise","desc":"\u003cp>ctx.write(msg, promise) 保持异步结果链。若业务决定丢弃，释放消息并显式失败原 Promise，调用者才能获知结果。\u003c/p>","set":{"values":["正常写入","出站跳过","正常编码","已发起","传递 Promise","已起步"],"status":["accent","","","","",""]},"edges":[[4,2,"ok"],[2,0,"ok"]],"moves":[[4,2,"msg"]],"line":10}]}],"concepts":[["Channel","连接与 I/O 操作入口，每条连接拥有 Pipeline。"],["Pipeline / Handler","处理器的有序链 / 对事件与操作的具体处理。"],["Context","当前 Handler 的位置与传播入口；ctx.write 与 channel.write 起点不同。"]],"issues":[["后续 Handler 不执行","检查是否 fireChannelRead / out.add，以及 Handler 的方向和匹配消息类型。"],["Encoder 没执行","检查添加位置、write 入口、消息类型；编码器应位于发起 ctx.write 的 Handler 前方。"],["发送监听器不回调","检查自定义出站 Handler 是否转发或完成原 Promise。"],["消息被提前释放","明确消费与转交的边界，尤其是 SimpleChannelInboundHandler 的自动释放。"]],"sources":[["Pipeline 传播规则","https://netty.io/4.1/api/io/netty/channel/ChannelPipeline.html"],["SimpleChannelInboundHandler","https://netty.io/4.1/api/io/netty/channel/SimpleChannelInboundHandler.html"]]};</script>
+<script src="netty-diagrams.js"></script>
+</body>
+</html>

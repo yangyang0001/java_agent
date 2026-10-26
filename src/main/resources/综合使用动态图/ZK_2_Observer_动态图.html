@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZooKeeper Observer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .stage .zone { fill: none; stroke: var(--line); stroke-width: 1.4; stroke-dasharray: 6 5; }
+  .stage .zone.vote { stroke: var(--accent); }
+  .stage .zone.obs { stroke: var(--violet); }
+  .stage .cross { stroke: var(--bad); stroke-width: 3; stroke-linecap: round; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">ZooKeeper · 2 · Observer</p>
+    <h1>Observer：只观察，不投票</h1>
+    <p class="lede">Observer 只是“观察者”：它从 Leader 同步数据、处理读请求、把写请求转发给 Leader；但它不参与 Leader 选举（既不投票，也不能被选为 Leader），也不参与写操作的过半 ACK。所以加再多 Observer，写入和选举都不会变慢。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>ZooKeeper 集群</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--accent)"></i>Leader / 当前焦点</span>
+            <span><i class="sw" style="background:var(--violet)"></i>Observer</span>
+            <span><i class="sw" style="background:var(--warn)"></i>未提交 / 等待中</span>
+            <span><i class="sw" style="background:var(--ok)"></i>已提交 / 已确认</span>
+            <span><i class="sw" style="background:var(--bad)"></i>宕机 / 不可用</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 470" role="img" aria-label="Leader、Follower 与 Observer 之间的写请求、选举和扩容过程"></svg>
+        <p class="cap">消息名称取自 ZAB 协议：Follower 收到 PROPOSAL 并回 ACK，过半后收到 COMMIT；Observer 只收到 INFORM（携带提案内容的提交通知）。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel"><div class="panel-h"><h2>配置</h2></div><pre class="code" id="code"></pre></section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>角色</th><th>读请求</th><th>写请求</th><th>选举投票</th><th>写提案 ACK</th></tr></thead>
+        <tbody>
+          <tr><td><b>Leader</b></td><td>处理</td><td>处理事务请求，发起提案，负责集群调度</td><td>参与</td><td>参与（算自己一票）</td></tr>
+          <tr><td><b>Follower</b></td><td>处理</td><td>转发给 Leader</td><td>参与</td><td>参与</td></tr>
+          <tr><td><b>Observer</b></td><td>处理</td><td>转发给 Leader</td><td class="bad">不参与</td><td class="bad">不参与，只收 INFORM</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul style="margin-top:10px">
+      <li>结论：只观察，不投票。同步数据、处理读请求、转发写请求，但不参与选举、不参与过半 ACK。</li>
+      <li>扩展读能力而不影响写性能：投票节点越多，写操作等待的“过半”确认越慢、选举也越慢；Observer 不投票，加多少都不拖慢写入和选举。</li>
+      <li>跨机房部署：远程机房放 Observer 提供本地读，跨机房延迟不会影响投票。</li>
+      <li>Observer 宕机不影响集群可用性（不计入过半数）。配置：节点自身 <code>peerType=observer</code>，集群配置 <code>server.4=host:2888:3888:observer</code>。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet } = Player;
+
+  // ---------- 布局 ----------
+  const big = (cx, top) => ({ x: cx - 60, y: top, w: 120, h: 60 });
+  const obs = (top) => ({ x: 541, y: top, w: 150, h: 60 });
+  const POS12 = { S1: big(241, 62), S2: big(126, 236), S3: big(356, 236), S4: obs(62), S5: obs(236), C: { x: 541, y: 382, w: 150, h: 44 } };
+  const fol = (k) => ({ x: 26 + k * 110, y: 236, w: 100, h: 60 });
+  const POS3 = { S1: big(241, 62), S2: fol(1), S3: fol(2), S6f: fol(0), S7f: fol(3), S4: obs(40), S5: obs(112), S6o: obs(184), S7o: obs(256) };
+  const NAME = { S6f: 'S6', S7f: 'S7', S6o: 'S6', S7o: 'S7' };
+  const ROLE = { L: 'Leader', F: 'Follower', O: 'Observer', LK: 'LOOKING', X: '宕机' };
+  const SUB = { L: '投票 · 发起提案', F: '参与投票', O: '不投票 · 只同步', LK: '选举中', X: '' };
+  const DEF = { L: 'box accent', F: 'box', O: 'box violet', LK: 'box warn', X: 'box bad dashed' };
+
+  const n = (role, data, cls, sub) => ({ role, data, cls, sub });
+  const base = d => ({ S1: n('L', d), S2: n('F', d), S3: n('F', d), S4: n('O', d), S5: n('O', d) });
+  const V0 = '0x1 · x=0', V1 = '0x2 · x=1';
+
+  const scenarios = [
+    {
+      label: '写请求：Observer 只收 INFORM',
+      pos: POS12,
+      code: ['# zoo.cfg (所有节点相同)', 'server.1=zk1:2888:3888', 'server.2=zk2:2888:3888', 'server.3=zk3:2888:3888', 'server.4=zk4:2888:3888:observer', 'server.5=zk5:2888:3888:observer', '# zk4、zk5 自身再加:', 'peerType=observer'],
+      state: { nodes: base(V0), client: '客户端', clientCls: '', info: [['投票成员 3 个（S1 + S2 + S3），过半 = 3/2 + 1 = 2', ''], ['Observer 2 个（S4、S5），不计入过半数', 'c-violet']] },
+      steps: [
+        { title: '初始：1 Leader + 2 Follower + 2 Observer', line: [2, 3, 4, 5, 6],
+          desc: '<p>只有 Leader 和 Follower 是 <b>投票成员</b>，过半数按它们算：3 个投票成员，过半 = 2。</p><p>Observer 同样保存完整数据（<code>zxid 0x1, x=0</code>），但不投票。</p>' },
+        { title: '客户端把写请求发给 Observer S5',
+          desc: '<p>客户端连在 S5 上，执行 <code>set /x 1</code>。</p><p>任何节点都能接收客户端连接，Observer 也不例外。</p>',
+          set: { nodes: { S5: { cls: 'box accent' } } }, fly: [['C', 'S5', 'set /x 1', 'accent']] },
+        { title: 'S5 把写请求转发给 Leader',
+          desc: '<p>写请求（事务请求）只能由 Leader 处理。Observer 和 Follower 一样，<b>原样转发给 Leader</b>。</p><p>这只是帮客户端跑腿，并不参与决策。</p>',
+          set: { nodes: { S5: { cls: 'box violet' }, S1: { cls: 'box accent' } } }, fly: [['S5', 'S1', 'REQUEST', 'accent']] },
+        { title: 'Leader 发起提案：PROPOSAL 只发给 Follower',
+          desc: '<p>Leader 分配新的事务 ID <code>zxid 0x2</code>，写入自己的事务日志，然后把 <b>PROPOSAL</b> 发给 S2、S3。</p><p class="warn">Observer 收不到 PROPOSAL，也就无需回 ACK。</p>',
+          set: { nodes: { S1: { data: '0x2 待提交', cls: 'box warn' }, S2: { data: '0x2 待提交', cls: 'box warn' }, S3: { data: '0x2 待提交', cls: 'box warn' } },
+            info: [['ACK：S1 ✓（自己）  S2 …  S3 …', 'c-warn'], ['过半需要 2 个，Observer 不在统计范围内', 'c-violet']] },
+          fly: [['S1', 'S2', 'PROPOSAL', 'warn'], ['S1', 'S3', 'PROPOSAL', 'warn']] },
+        { title: 'S2 回 ACK：已经过半',
+          desc: '<p>S2 把提案写入磁盘后回 <b>ACK</b>。Leader 自己 + S2 = 2 票，<b>达到过半</b>。</p><p>不用等 S3：慢一点的 Follower 不会拖住这次写入。</p>',
+          set: { nodes: { S2: { cls: 'box ok' } }, info: [['ACK：S1 ✓  S2 ✓  S3 …   2 / 3 ≥ 过半', 'c-ok'], ['Observer 的状态与这次判定无关', 'c-violet']] },
+          fly: [['S2', 'S1', 'ACK', 'ok'], ['S3', 'S1', 'ACK', 'warn']] },
+        { title: 'COMMIT 给 Follower，INFORM 给 Observer',
+          desc: '<p>Leader 向 Follower 发 <b>COMMIT</b>（它们已有提案内容，只需提交）。</p><p>向 Observer 发 <b>INFORM</b>：因为它们没收到 PROPOSAL，INFORM 里 <b>带着提案内容</b>。</p>',
+          set: { nodes: { S1: { data: V1, cls: 'box accent' } } },
+          fly: [['S1', 'S2', 'COMMIT', 'ok'], ['S1', 'S3', 'COMMIT', 'ok'], ['S1', 'S4', 'INFORM', 'violet'], ['S1', 'S5', 'INFORM', 'violet']] },
+        { title: '所有节点应用 x = 1',
+          desc: '<p>五个节点都把 <code>zxid 0x2</code> 应用到内存数据库，数据一致。</p><p>S5 给客户端返回成功。</p>',
+          set: { nodes: { S1: { data: V1, cls: 'box accent' }, S2: { data: V1, cls: 'box ok' }, S3: { data: V1, cls: 'box ok' }, S4: { data: V1, cls: 'box ok' }, S5: { data: V1, cls: 'box ok' } },
+            info: [['全部节点 zxid 0x2，x = 1', 'c-ok'], ['写入耗时只取决于 Leader 与最快的过半 Follower', '']] },
+          fly: [['S5', 'C', 'OK', 'ok']] },
+        { title: '读请求：Observer 本地直接返回',
+          desc: '<p>客户端执行 <code>get /x</code>，S5 <b>直接读本地内存</b> 返回，不经过 Leader，也不需要投票。</p><p>读请求可以分摊到任意节点，这就是加 Observer 能提高读能力的原因。需要读到最新值时可先调用 <code>sync()</code>。</p>',
+          set: { nodes: { S2: { cls: 'box' }, S3: { cls: 'box' }, S4: { cls: 'box violet' }, S5: { cls: 'box accent' } } },
+          fly: [['C', 'S5', 'get /x', 'accent']], back: [['S5', 'C', 'x=1', 'ok']] },
+        { title: '小结：只观察，不投票',
+          desc: '<p class="ok">能做：同步数据、处理读、转发写。</p><p class="bad">不做：不参与选举，没收到 PROPOSAL，没回 ACK，不计入过半。</p>',
+          set: { nodes: { S5: { cls: 'box violet' } }, info: [['能做：同步数据 · 处理读 · 转发写', 'c-ok'], ['不做：不选举 · 不投票 · 不参与过半 ACK', 'c-bad']] }, dwell: 3600 },
+      ],
+    },
+    {
+      label: 'Leader 选举：Observer 不投票',
+      pos: POS12,
+      code: ['# 选票比较规则 (FastLeaderElection)', '1. epoch 大的优先', '2. epoch 相同, zxid 大的优先', '3. zxid 相同, myid 大的优先', '# 得到过半投票成员支持即当选'],
+      state: { nodes: base(V1), client: '', info: [['投票成员 3 个，过半 = 2', ''], ['Observer 不发选票', 'c-violet']] },
+      steps: [
+        { title: '初始：S1 是 Leader',
+          desc: '<p>集群正常工作，所有节点都是 <code>zxid 0x2</code>。</p>' },
+        { title: 'Leader S1 宕机',
+          desc: '<p>S1 崩溃。Follower 失去 Leader，进入 <b>LOOKING</b> 状态，开始选举。</p><p>Observer 也失去 Leader，但它 <b>不参加选举</b>，只能等新 Leader 出现。选举期间集群暂停对外服务。</p>',
+          set: { nodes: { S1: { role: 'X', data: '' }, S2: { role: 'LK' }, S3: { role: 'LK' }, S4: { cls: 'box warn', sub: '等待新 Leader' }, S5: { cls: 'box warn', sub: '等待新 Leader' } },
+            info: [['剩余投票成员 2 个（S2、S3），仍 ≥ 过半 2，可以选出 Leader', 'c-warn'], ['S4、S5：不投票，等待结果', 'c-violet']] } },
+        { title: 'S2、S3 先投自己',
+          desc: '<p>每个投票成员先投自己一票，选票格式 <code>(myid, zxid)</code>，发给其他投票成员。</p><p class="warn">Observer 不发出选票，选票里也不会出现 Observer。</p>',
+          line: 1, fly: [['S2', 'S3', '(2, 0x2)', 'warn', -16], ['S3', 'S2', '(3, 0x2)', 'warn', 16]] },
+        { title: '比较选票：S2 改投 S3', line: [3, 4],
+          desc: '<p>两张选票 zxid 相同（都是 0x2），比较 myid：3 &gt; 2。</p><p>S2 发现 S3 更合适，<b>改投 S3</b> 并重新广播。</p>',
+          fly: [['S2', 'S3', '(3, 0x2)', 'accent']] },
+        { title: 'S3 得到过半选票，当选 Leader', line: 5,
+          desc: '<p>S3 收到 2 票（S2 + 自己），达到过半 2，成为新 Leader；S2 成为 Follower。</p><p>整个过程只有投票成员参与，<b>Observer 数量多少都不影响选举速度</b>。</p>',
+          set: { nodes: { S2: { role: 'F' }, S3: { role: 'L' } }, leader: 'S3', info: [['选票：S2 → S3，S3 → S3   2 / 3 ≥ 过半', 'c-ok'], ['Observer 的票数：0（不参与）', 'c-violet']] } },
+        { title: 'Follower 和 Observer 向新 Leader 同步',
+          desc: '<p>S2、S4、S5 连接新 Leader S3，对齐数据（差异同步 DIFF）。完成后集群恢复服务。</p><p>Observer 只是跟上新 Leader：同步数据，继续提供读。</p>',
+          set: { nodes: { S4: { cls: '', sub: '' }, S5: { cls: '', sub: '' } }, info: [['新 Leader S3，集群恢复服务', 'c-ok'], ['投票成员只剩 2 个，刚好够过半', 'c-warn']] },
+          fly: [['S3', 'S2', 'SYNC', 'ok'], ['S3', 'S4', 'SYNC', 'violet'], ['S3', 'S5', 'SYNC', 'violet']] },
+        { title: '再挂一个 Follower：Observer 帮不上忙',
+          desc: '<p>如果 S2 也宕机，投票成员只剩 S3 一个：1 &lt; 2，<b>达不到过半</b>，集群不可用。</p><p class="bad">虽然 S4、S5 都活着，但 Observer 不计入过半数，无法挽救可用性。</p>',
+          set: { nodes: { S2: { role: 'X', data: '' }, S3: { role: 'LK', data: V1 }, S4: { cls: 'box bad', sub: '无 Leader，停服' }, S5: { cls: 'box bad', sub: '无 Leader，停服' } },
+            info: [['投票成员存活 1 / 3 < 过半 2 → 集群不可用', 'c-bad'], ['可用性只看投票成员，Observer 不算数', 'c-violet']] }, dwell: 3600 },
+      ],
+    },
+    {
+      label: '扩容：加 Observer vs 加 Follower',
+      pos: POS3,
+      code: ['# 方案 A: 新增两个 Observer', 'server.6=zk6:2888:3888:observer', 'server.7=zk7:2888:3888:observer', '', '# 方案 B: 新增两个 Follower', 'server.6=zk6:2888:3888', 'server.7=zk7:2888:3888'],
+      state: { nodes: base(V0), info: [['投票成员 3 个，过半 = 2', ''], ['Observer 2 个', 'c-violet']] },
+      steps: [
+        { title: '初始：3 个投票成员 + 2 个 Observer',
+          desc: '<p>读请求越来越多，需要扩容。有两种选择：加 Observer，或加 Follower。</p>' },
+        { title: '方案 A：再加两个 Observer（S6、S7）', line: [2, 3],
+          desc: '<p>新节点以 Observer 身份加入，从 Leader 同步数据。</p><p class="ok">投票成员还是 3 个，<b>过半数仍然是 2</b>。</p>',
+          set: { nodes: { S6o: n('O', V0, 'box ok'), S7o: n('O', V0, 'box ok') }, info: [['投票成员 3 个，过半 = 2（不变）', 'c-ok'], ['Observer 4 个', 'c-violet']] },
+          fly: [['S1', 'S6o', 'SYNC', 'violet'], ['S1', 'S7o', 'SYNC', 'violet']] },
+        { title: '写一次：仍然只等 1 个 Follower 的 ACK',
+          desc: '<p>PROPOSAL 只发给 2 个 Follower，Leader + 最快的 1 个 Follower 就够过半。</p><p>4 个 Observer 只收 INFORM，<b>写延迟和原来一样</b>。</p>',
+          set: { nodes: { S1: { data: V1 }, S2: { data: V1, cls: 'box ok' }, S3: { data: V1 }, S4: { data: V1 }, S5: { data: V1 }, S6o: { data: V1, cls: '' }, S7o: { data: V1, cls: '' } }, info: [['ACK：S1 ✓  S2 ✓   2 / 3 ≥ 过半', 'c-ok'], ['INFORM × 4，不需要回复', 'c-violet']] },
+          fly: [['S1', 'S2', 'PROPOSAL/ACK', 'ok'], ['S1', 'S4', 'INFORM', 'violet'], ['S1', 'S5', 'INFORM', 'violet'], ['S1', 'S6o', 'INFORM', 'violet'], ['S1', 'S7o', 'INFORM', 'violet']] },
+        { title: '读能力提升',
+          desc: '<p>读请求由各节点本地处理。多了 2 个 Observer，能分担的读流量就多了。</p><p>跨机房时把 Observer 放在远程机房：本地读很快，跨机房延迟又不会进入投票环节。</p>',
+          set: { nodes: { S2: { cls: '' } }, info: [['7 个节点都能处理读请求', 'c-ok'], ['写入和选举只涉及 3 个投票成员', '']] },
+          reads: ['S4', 'S5', 'S6o', 'S7o'] },
+        { title: 'Observer S4 宕机：不影响可用性',
+          desc: '<p>S4 挂了，它的客户端自动重连到其他节点。</p><p class="ok">投票成员 3 个都在，过半没受影响，写入照常。</p>',
+          set: { nodes: { S4: { role: 'X', data: '' } }, info: [['投票成员存活 3 / 3，过半 = 2，正常', 'c-ok'], ['Observer 少一个只是读能力下降', 'c-violet']] } },
+        { title: '方案 B：改为加两个 Follower', line: [6, 7],
+          desc: '<p>对比：如果 S6、S7 以 Follower 身份加入，投票成员变成 5 个。</p><p class="warn">过半数变成 5/2 + 1 = <b>3</b>。</p>',
+          set: { nodes: { S4: n('O', V1), S6o: null, S7o: null, S6f: n('F', V1, 'box warn'), S7f: n('F', V1, 'box warn') }, info: [['投票成员 5 个，过半 = 3', 'c-warn'], ['Observer 2 个', 'c-violet']] } },
+        { title: '写一次：要等 2 个 Follower 的 ACK',
+          desc: '<p>PROPOSAL 要发给 4 个 Follower，Leader 要凑够 3 票：自己 + <b>2 个</b> Follower。</p><p class="warn">要等第二快的 Follower，网络抖动和慢节点更容易拖慢写入。</p>',
+          set: { nodes: { S6f: { cls: '' }, S7f: { cls: '' }, S2: { cls: 'box ok' }, S3: { cls: 'box ok' } }, info: [['ACK：S1 ✓  S2 ✓  S3 ✓   3 / 5 ≥ 过半', 'c-warn'], ['消息量：PROPOSAL × 4 + ACK × 4', '']] },
+          fly: [['S1', 'S6f', 'PROPOSAL ×4', 'warn'], ['S1', 'S2', '', 'warn'], ['S1', 'S3', '', 'warn'], ['S1', 'S7f', '', 'warn']], back: [['S2', 'S1', 'ACK', 'ok'], ['S3', 'S1', 'ACK', 'ok']] },
+        { title: '选举也更慢',
+          desc: '<p>Leader 宕机时，5 个投票成员两两交换选票，要凑够 3 票才能选出新 Leader，消息更多、收敛更慢。</p><p>好处是能容忍 2 个投票成员宕机。<b>要容错就加 Follower，要读能力就加 Observer。</b></p>',
+          set: { nodes: { S2: { cls: '' }, S3: { cls: '' } }, info: [['加 Follower：过半数变大 → 写和选举都变慢', 'c-bad'], ['加 Observer：过半数不变 → 只增加读能力', 'c-ok']] }, dwell: 3600 },
+      ],
+    },
+  ];
+
+  let E, POS;
+  const center = id => { const p = POS[id]; return { x: p.x + p.w / 2, y: p.y + p.h / 2 }; };
+  // 从 a 的中心飞到 b 的边框
+  function clip(a, id) {
+    const p = POS[id], c = center(id);
+    const dx = a.x - c.x, dy = a.y - c.y;
+    const t = Math.min(dx ? (p.w / 2) / Math.abs(dx) : 1e9, dy ? (p.h / 2) / Math.abs(dy) : 1e9);
+    return { x: c.x + dx * t, y: c.y + dy * t };
+  }
+  function fly(fx, a, b, label, c, dy) {
+    const from = center(a), to = clip(from, b), st = clip(center(b), a);
+    if (dy) { to.y += dy; st.y += dy; }
+    const g = packet(fx, st, to, label, c);
+    const t = g.querySelector('text');
+    if (t && to.x > from.x + 4) { t.setAttribute('x', -11); t.setAttribute('text-anchor', 'end'); }
+    if (t && Math.abs(to.x - from.x) < 30) t.setAttribute('y', to.y > from.y ? -10 : 18);
+    if (t && dy) t.setAttribute('y', dy < 0 ? -10 : 18);
+  }
+
+  Player({
+    scenarios,
+    dwell: 3000,
+    init(g, ctx) {
+      const sc = scenarios[ctx.scenario];
+      POS = sc.pos;
+      E = { box: {}, title: {}, sub: {}, data: {}, grp: {}, cross: {} };
+      svg('rect', { x: 16, y: 26, width: 456, height: 316, rx: 12, class: 'zone vote' }, g);
+      svg('text', { x: 24, y: 18, class: 'small c-accent' }, g, '投票成员：选举投票 + 写操作过半 ACK');
+      svg('rect', { x: 488, y: 26, width: 256, height: 316, rx: 12, class: 'zone obs' }, g);
+      svg('text', { x: 496, y: 18, class: 'small c-violet' }, g, 'Observer（观察者）：不选举、不投票');
+      E.links = svg('g', {}, g);
+      for (const id in POS) {
+        const p = POS[id];
+        const gg = svg('g', { class: 'anim' }, g);
+        E.grp[id] = gg;
+        E.box[id] = svg('rect', { x: p.x, y: p.y, width: p.w, height: p.h, rx: 8, class: 'box anim' }, gg);
+        if (id === 'C') {
+          E.title[id] = svg('text', { x: p.x + p.w / 2, y: p.y + 27, 'text-anchor': 'middle', class: 'title' }, gg, '客户端');
+          continue;
+        }
+        E.title[id] = svg('text', { x: p.x + 10, y: p.y + 20, class: 'title' }, gg, '');
+        E.sub[id] = svg('text', { x: p.x + 10, y: p.y + 37, class: 'small muted' }, gg, '');
+        E.data[id] = svg('text', { x: p.x + 10, y: p.y + 53, class: 'mono small' }, gg, '');
+        E.cross[id] = svg('path', { d: `M${p.x + p.w - 26},${p.y + 10} l16,16 M${p.x + p.w - 10},${p.y + 10} l-16,16`, class: 'cross anim' }, gg);
+      }
+      E.info = [0, 1].map(k => svg('text', { x: 24, y: 384 + k * 26, class: 'small' }, g, ''));
+    },
+    render(st, step, i, ctx) {
+      const leader = st.leader || 'S1';
+      const lc = center(leader);
+      while (E.links.firstChild) E.links.removeChild(E.links.firstChild);
+      for (const id in POS) {
+        if (id === 'C') { E.grp.C.classList.toggle('hide', !st.client); continue; }
+        const nd = st.nodes[id];
+        E.grp[id].classList.toggle('hide', !nd);
+        if (!nd) continue;
+        E.title[id].textContent = (NAME[id] || id) + ' ' + ROLE[nd.role];
+        E.sub[id].textContent = nd.sub || SUB[nd.role];
+        E.data[id].textContent = nd.data ? (POS[id].w >= 120 ? 'zxid ' : '') + nd.data : '';
+        E.box[id].setAttribute('class', 'anim ' + (nd.role === 'X' ? DEF.X : (nd.cls || DEF[nd.role])));
+        E.cross[id].classList.toggle('hide', nd.role !== 'X');
+        if (id !== leader && nd.role !== 'X' && st.nodes[leader] && st.nodes[leader].role === 'L') {
+          const a = clip(center(id), leader), c = clip(lc, id);
+          svg('line', { x1: a.x, y1: a.y, x2: c.x, y2: c.y, class: 'wire' + (nd.role === 'O' ? ' dashed' : '') }, E.links);
+        }
+      }
+      if (st.client) {
+        const c = clip(center('S5'), 'C'), s5 = clip(center('C'), 'S5');
+        svg('line', { x1: c.x, y1: c.y, x2: s5.x, y2: s5.y, class: 'wire dashed' }, E.links);
+      }
+      (st.info || []).forEach(([t, c], k) => { E.info[k].textContent = t; E.info[k].setAttribute('class', 'small ' + (c || '')); });
+      for (let k = (st.info || []).length; k < E.info.length; k++) E.info[k].textContent = '';
+      for (const f of step.fly || []) fly(ctx.fx, ...f);
+      const tok = E.tok = (E.tok || 0) + 1;
+      if (step.back) setTimeout(() => { if (E.tok === tok) for (const f of step.back) fly(ctx.fx, ...f); }, 900);
+      for (const id of step.reads || []) {
+        const p = POS[id];
+        const g = packet(ctx.fx, { x: 760, y: p.y + p.h / 2 }, { x: p.x + p.w + 4, y: p.y + p.h / 2 }, '', 'ok');
+        svg('text', { x: 10, y: -10, class: 'small c-ok' }, g, '读');
+      }
+    },
+  });
+})();
+</script>
+</body>
+</html>

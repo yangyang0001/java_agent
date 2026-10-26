@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>synchronized 锁升级</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .stage .fadein { animation: fadein .6s ease; }
+  @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+  .stage text.tok { font-family: var(--f-mono); font-size: 11.5px; font-weight: 600; }
+  .stage text.lockbits { font-family: var(--f-mono); font-size: 15px; font-weight: 600; }
+  @media (prefers-reduced-motion: reduce) { .stage .fadein { animation: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">JUC · 11 · synchronized Lock Escalation</p>
+    <h1>synchronized 锁升级：Mark Word 怎么变</h1>
+    <p class="lede">synchronized 代码块编译为 <code>monitorenter</code> / <code>monitorexit</code>，方法用 <code>ACC_SYNCHRONIZED</code> 标志；锁状态记录在对象头的 Mark Word 中。随着竞争加剧，锁按 无锁 → 偏向锁 → 轻量级锁 → 重量级锁 升级，一般不降级。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>对象头、线程栈与 ObjectMonitor</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--accent)"></i>本步变化</span>
+            <span><i class="sw" style="background:var(--warn)"></i>竞争 / 阻塞</span>
+            <span><i class="sw" style="background:var(--ok)"></i>持有锁</span>
+            <span><i class="sw" style="background:var(--violet)"></i>偏向</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 480" role="img" aria-label="对象 Mark Word 在无锁、偏向锁、轻量级锁、重量级锁之间变化，以及线程栈中的 Lock Record 和 ObjectMonitor"></svg>
+        <p class="cap">按 64 位 HotSpot 画 Mark Word，各字段宽度不按比例。圆点是线程，箭头表示 Mark Word 中的指针指向哪里。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>代码</h2></div>
+        <pre class="code" id="code"></pre>
+      </section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>锁状态</th><th>Mark Word</th><th>加锁方式</th><th>适用场景</th></tr></thead>
+        <tbody>
+          <tr><td>无锁</td><td><code>hashcode | age | 0 | 01</code></td><td>—</td><td>—</td></tr>
+          <tr><td>偏向锁</td><td><code>thread ID | epoch | age | 1 | 01</code></td><td>第一次 CAS 写入线程 ID，之后只比较线程 ID</td><td>基本只有一个线程访问</td></tr>
+          <tr><td>轻量级锁</td><td><code>ptr_to_lock_record | 00</code></td><td>栈中建 Lock Record，复制 Displaced Mark Word，CAS 替换为指针；失败则自适应自旋</td><td>线程交替执行、竞争不激烈</td></tr>
+          <tr><td>重量级锁</td><td><code>ptr_to_monitor | 10</code></td><td>ObjectMonitor（<code>_owner</code>、<code>_EntryList</code>、<code>_WaitSet</code>、<code>_recursions</code>），抢不到就阻塞</td><td>竞争激烈；依赖操作系统 mutex，有用户态 / 内核态切换，开销最大</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul style="margin-top:10px">
+      <li>出现其他线程竞争时，偏向锁要在<b>安全点</b>撤销，再升级为轻量级锁。调用过 <code>hashCode()</code> 的对象无法偏向：Mark Word 没有位置同时存线程 ID 和 hashCode。</li>
+      <li>版本变化：JDK15（JEP 374）默认禁用偏向锁并标记为废弃（撤销成本高，现代应用收益小），后续版本已移除，所以新版本 JDK 中实际是 无锁 → 轻量级锁 → 重量级锁。</li>
+      <li>其他优化：锁消除（逃逸分析发现对象不会逃逸）、锁粗化（合并相邻的同步块）。</li>
+      <li>本图按经典实现讲解。较新的 JDK 还引入了基于 lock-stack 的新轻量级锁实现，不再复制 Displaced Mark Word，但“轻量级 → 重量级”的思路不变。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, packet, move, arrow } = Player;
+  const BAR = { x: 30, y: 84, h: 44 };
+  const LAYOUT = {
+    unlocked: [['unused', 'unused·25', 90], ['hash', 'hashcode·31', 210], ['u1', 'unused·1', 70], ['age', 'age·4', 70], ['biased', 'biased_lock·1', 120], ['lock', 'lock·2', 140]],
+    biased: [['thread', 'thread ID·54', 230], ['epoch', 'epoch·2', 70], ['u1', 'unused·1', 70], ['age', 'age·4', 70], ['biased', 'biased_lock·1', 120], ['lock', 'lock·2', 140]],
+    light: [['ptr', 'ptr_to_lock_record·62', 560], ['lock', 'lock·2', 140]],
+    heavy: [['ptr', 'ptr_to_heavyweight_monitor·62', 560], ['lock', 'lock·2', 140]],
+  };
+  const COLX = k => 16 + k * 176;   // 线程 A / B / C 栈
+  const TH = ['A', 'B', 'C'];
+  const LR_Y = [262, 322];
+  const MON = { x: 548, y: 196, w: 196, h: 244 };
+  const SLOT = {
+    home: k => ({ x: COLX(k) + 144, y: 216 }),
+    entry0: () => ({ x: 580, y: 340 }), entry1: () => ({ x: 622, y: 340 }),
+    wait0: () => ({ x: 580, y: 412 }),
+  };
+  const P = {
+    mwT: { x: 270, y: 76 }, mwP: { x: 420, y: 76 },
+    lrA: { x: COLX(0) + 118, y: 132 }, lrB: { x: COLX(1) + 118, y: 132 }, lrC: { x: COLX(2) + 118, y: 132 },
+    lrA0: { x: COLX(0) + 146, y: 270 }, lrB0: { x: COLX(1) + 146, y: 270 }, lrC0: { x: COLX(2) + 146, y: 270 },
+    mon: { x: 724, y: 214 },
+  };
+
+  const UNLOCKED = { layout: 'unlocked', v: { unused: '0', hash: '0（未计算）', u1: '0', age: '0', biased: '0', lock: '01' } };
+  const ANON = { layout: 'biased', v: { thread: '0（匿名偏向）', epoch: '0', u1: '0', age: '0', biased: '1', lock: '01' } };
+  const BIASED_A = { layout: 'biased', v: { thread: '线程 A', epoch: '0', u1: '0', age: '0', biased: '1', lock: '01' } };
+  const LIGHT = who => ({ layout: 'light', v: { ptr: `→ 线程 ${who} 栈中的 Lock Record`, lock: '00' } });
+  const HEAVY = { layout: 'heavy', v: { ptr: '→ ObjectMonitor', lock: '10' } };
+  const DESC = { unlocked: '001：无锁', biased: '101：偏向锁', light: '00：轻量级锁', heavy: '10：重量级锁' };
+  const LR = { d: 'dhw = 001 无锁头' };
+
+  const base = {
+    stage: 0, mw: UNLOCKED, target: null, mon: null, result: '', resultCls: '',
+    th: { A: ['', '未进入'], B: ['', '未进入'], C: ['', '未进入'] },
+    tok: { A: 'home', B: 'home', C: 'home' },
+    lr: { A: [], B: [], C: [] },
+  };
+
+  const scenarios = [
+    {
+      label: 'JDK8：无锁 → 偏向 → 轻量级 → 重量级',
+      code: ['Object obj = new Object();', '// 线程 A、B、C 都执行:', 'synchronized (obj) {', '    doSomething();', '}', '// 编译为 monitorenter/exit'],
+      state: base,
+      steps: [
+        { title: '新对象：无锁 001', desc: '<p>对象头的 Mark Word 末尾 3 位是 <code>0 01</code>：偏向位 0，锁标志 01，表示<b>无锁</b>。</p><p>hashCode 是懒计算的，没调用过 <code>hashCode()</code> 时这里是 0。</p>', line: 1 },
+        { title: '可偏向：匿名偏向 101', desc: '<p>JDK8 默认开启偏向锁（JVM 启动约 4 秒后生效，<code>BiasedLockingStartupDelay</code>）。之后新建的对象 Mark Word 为 <code>1 01</code>，线程 ID 为 0，叫<b>匿名偏向</b>：可以偏向，但还没偏向任何线程。</p>',
+          line: 1, set: { mw: ANON }, mwHot: ['thread', 'biased'] },
+        { title: '线程 A 首次进入：CAS 写入线程 ID', desc: '<p>A 执行 <code>monitorenter</code>，用 <b>一次 CAS</b> 把自己的线程 ID 写进 Mark Word，锁就偏向了 A。</p>',
+          line: 3, set: { stage: 1, mw: BIASED_A, th: { A: ['accent', '执行同步块'] } }, mwHot: ['thread'], moves: [['tokA', 'mwT', 'CAS 线程ID', 'accent']] },
+        { title: 'A 退出：偏向锁不主动释放', desc: '<p>A 退出同步块，Mark Word <b>保持不变</b>，仍然记录着 A 的线程 ID。</p>',
+          line: 5, set: { th: { A: ['', '已退出同步块'] } } },
+        { title: 'A 再次进入：只比较线程 ID', desc: '<p>A 再进来时发现 Mark Word 里就是自己的 ID，<b class="ok">不需要 CAS</b>，直接进入。适合基本只有一个线程访问的场景。</p>',
+          line: [3, 4], set: { th: { A: ['ok', '再入，无 CAS'] } }, mwHot: ['thread'] },
+        { title: '线程 B 来竞争：ID 不是自己', desc: '<p>A 已经退出。B 进入时发现 Mark Word 偏向的是 A，CAS 失败，只能请求<b class="warn">撤销偏向</b>。</p>',
+          line: 3, set: { th: { A: ['', '已退出同步块'], B: ['warn', '请求撤销偏向'] } }, moves: [['tokB', 'mwT', '偏向 A？', 'warn']] },
+        { title: '在安全点撤销偏向锁', desc: '<p>撤销要等到<b>全局安全点</b>（STW），检查 A 的状态：</p><p>A 已不在同步块 → 恢复为无锁 <code>001</code>。（如果 A 还在同步块里，就直接升级为 A 持有的轻量级锁。）</p><p>撤销成本高，这是后来废弃偏向锁的原因。</p>',
+          line: 3, set: { stage: 0, mw: UNLOCKED, result: '全局安全点（STW）：撤销偏向', resultCls: 'c-warn' }, mwHot: ['biased', 'lock'] },
+        { title: 'B 在栈中建 Lock Record', desc: '<p>B 在自己的栈帧里创建 <b>Lock Record</b>，把对象当前的 Mark Word 复制过去，叫 <b>Displaced Mark Word</b>。</p>',
+          line: 3, set: { result: '', lr: { B: [LR] }, th: { B: ['accent', '复制 Mark Word'] } }, lrHot: 'B0', moves: [['lrB', 'lrB0', '', 'accent']] },
+        { title: 'B CAS 成功：轻量级锁 00', desc: '<p>B 用 CAS 把对象的 Mark Word 替换为<b>指向自己 Lock Record 的指针</b>，锁标志变成 <code>00</code>。</p><p>适合线程交替执行、竞争不激烈的场景。</p>',
+          line: [3, 4], set: { stage: 2, mw: LIGHT('B'), target: 'B', th: { B: ['ok', '持有轻量级锁'] } }, mwHot: ['ptr', 'lock'] },
+        { title: '线程 C 竞争：CAS 失败，自旋', desc: '<p>C 也建好 Lock Record 去 CAS，但 Mark Word 已经指向 B，CAS 失败。</p><p>C 不立刻阻塞，而是<b class="warn">自适应自旋</b>：空转几圈再试。</p>',
+          line: 3, set: { lr: { C: [LR] }, th: { C: ['warn', '自旋 CAS 中…'] } }, spin: 'C' },
+        { title: '自旋失败：膨胀为重量级锁', desc: '<p>自旋仍拿不到锁（或竞争线程较多），锁<b>膨胀</b>：创建 <code>ObjectMonitor</code>，Mark Word 改为指向它，锁标志变成 <code>10</code>。</p><p>B 成为 <code>_owner</code>，原来的 Mark Word 保存到 monitor 中。</p>',
+          line: 3, set: { stage: 3, mw: HEAVY, target: 'mon', mon: { owner: '线程 B', rec: '0' }, lr: { C: [] }, th: { C: ['warn', '锁已膨胀'] } }, mwHot: ['ptr', 'lock'], monHot: true },
+        { title: 'C 进入 _EntryList 阻塞', desc: '<p>抢不到 monitor 的 C 进入 <code>_EntryList</code>，<code>park</code> 挂起。</p><p>阻塞和唤醒依赖操作系统 mutex，要在用户态和内核态之间切换，<b class="warn">开销最大</b>。</p>',
+          line: 3, set: { tok: { C: 'entry0' }, th: { C: ['warn', '阻塞（park）'] } } },
+        { title: 'B 退出，C 被唤醒获得锁', desc: '<p>B 执行 <code>monitorexit</code>，释放 monitor 并唤醒 <code>_EntryList</code> 中的 C。C 成为新的 <code>_owner</code>。</p>',
+          line: 5, set: { tok: { C: 'home' }, lr: { B: [] }, mon: { owner: '线程 C' }, th: { B: ['', '已退出'], C: ['ok', '持有重量级锁'] } }, monHot: true },
+        { title: '小结：只升级，一般不降级', desc: '<p>无锁 → 偏向锁 → 轻量级锁 → 重量级锁。锁膨胀后，即使竞争消失，这个对象的锁一般也不会再降级。</p>',
+          line: [3, 5], set: { result: '偏向：只比较 ID  →  轻量级：CAS + 自旋  →  重量级：阻塞', resultCls: 'c-accent' }, dwell: 3800 },
+      ],
+    },
+    {
+      label: 'JDK15+：偏向锁默认关闭',
+      noBias: true,
+      code: ['Object obj = new Object();', '// 线程 A', 'synchronized (obj) {', '    synchronized (obj) { }  // 重入', '}', '// 线程 B', 'synchronized (obj) {', '    obj.wait();', '}', '// 线程 C', 'synchronized (obj) {', '    obj.notify();', '}'],
+      state: base,
+      steps: [
+        { title: '新对象：无锁 001', desc: '<p>JDK15（JEP 374）起偏向锁<b>默认关闭</b>并被废弃，后续版本已移除。新对象就是普通的无锁状态 <code>001</code>，加锁直接走轻量级锁。</p>', line: 1 },
+        { title: 'A 进入：建 Lock Record', desc: '<p>A 在栈帧中创建 Lock Record，复制 Mark Word（Displaced Mark Word）。</p>', line: 3,
+          set: { lr: { A: [LR] }, th: { A: ['accent', '复制 Mark Word'] } }, lrHot: 'A0', moves: [['lrA', 'lrA0', '', 'accent']] },
+        { title: 'A CAS 成功：轻量级锁 00', desc: '<p>CAS 把 Mark Word 换成指向 A 的 Lock Record 的指针，锁标志 <code>00</code>。</p>', line: 3,
+          set: { stage: 2, mw: LIGHT('A'), target: 'A', th: { A: ['ok', '持有轻量级锁'] } }, mwHot: ['ptr', 'lock'] },
+        { title: 'A 重入：再压一个 Lock Record', desc: '<p>重入时发现 Mark Word 指向自己的栈，就再压一个 Lock Record，其中 Displaced Mark Word 为 <b>null</b>。重入次数 = Lock Record 的个数。</p>', line: 4,
+          set: { lr: { A: [LR, { d: 'dhw = null（重入）' }] } }, lrHot: 'A1' },
+        { title: 'A 两次退出：CAS 还原 Mark Word', desc: '<p>内层退出：弹出 null 的那条记录即可。外层退出：用 CAS 把 Displaced Mark Word 写回对象头，恢复无锁 <code>001</code>。</p>', line: [4, 5],
+          set: { stage: 0, mw: UNLOCKED, target: null, lr: { A: [] }, th: { A: ['', '已退出'] } }, mwHot: ['hash', 'lock'], moves: [['lrA0', 'lrA', '', 'ok']] },
+        { title: 'B 进入：轻量级锁', desc: '<p>A、B 交替执行，没有真正的竞争。B 同样通过 Lock Record + CAS 拿到轻量级锁。</p>', line: 7,
+          set: { stage: 2, mw: LIGHT('B'), target: 'B', lr: { B: [LR] }, th: { B: ['ok', '持有轻量级锁'] } }, mwHot: ['ptr', 'lock'], lrHot: 'B0' },
+        { title: 'C 竞争，自旋失败 → 膨胀', desc: '<p>B 还没退出，C 来竞争：CAS 失败、自旋失败，锁膨胀为重量级锁。C 进入 <code>_EntryList</code> 阻塞。</p>', line: 11,
+          set: { stage: 3, mw: HEAVY, target: 'mon', mon: { owner: '线程 B', rec: '0' }, tok: { C: 'entry0' }, th: { C: ['warn', '阻塞（park）'] } }, mwHot: ['ptr', 'lock'], monHot: true },
+        { title: 'B 调用 wait()：进入 _WaitSet', desc: '<p><code>wait()</code> 会释放 monitor，B 进入 <code>_WaitSet</code> 等待。</p><p>C 被唤醒，成为新的 <code>_owner</code>。</p><p>（wait / notify 依赖 ObjectMonitor，所以调用它们一定会让锁膨胀。）</p>', line: [8, 11],
+          set: { tok: { B: 'wait0', C: 'home' }, lr: { B: [] }, mon: { owner: '线程 C' }, th: { B: ['warn', 'wait() 中'], C: ['ok', '持有重量级锁'] } }, monHot: true },
+        { title: 'C 调用 notify()：B 移到 _EntryList', desc: '<p><code>notify()</code> 不释放锁，只把 B 从 <code>_WaitSet</code> 移到 <code>_EntryList</code>（或 <code>_cxq</code>），B 继续等锁。</p>', line: 12,
+          set: { tok: { B: 'entry0' }, th: { B: ['warn', '等待重新抢锁'] } } },
+        { title: 'C 退出：B 重新获得锁', desc: '<p>C 退出同步块，释放 monitor，B 被唤醒，成为 <code>_owner</code>，从 <code>wait()</code> 处返回继续执行。</p>', line: [8, 13],
+          set: { tok: { B: 'home' }, mon: { owner: '线程 B' }, th: { B: ['ok', '从 wait() 返回'], C: ['', '已退出'] } }, monHot: true },
+        { title: '小结：无锁 → 轻量级 → 重量级', desc: '<p>新版本 JDK 少了偏向锁这一级：无竞争或交替执行时用轻量级锁（CAS），竞争激烈时膨胀为重量级锁（阻塞）。</p>',
+          set: { result: '无锁 001 → 轻量级 00 → 重量级 10', resultCls: 'c-accent' }, dwell: 3800 },
+      ],
+    },
+  ];
+
+  let E;
+  const STAGES = ['无锁', '偏向锁', '轻量级锁', '重量级锁'];
+  const LOCK_CLS = mw => mw.v.lock === '00' ? 'ok' : mw.v.lock === '10' ? 'warn' : mw.v.biased === '1' ? 'violet' : 'soft';
+
+  function token(g, label) {
+    const tg = svg('g', { class: 'anim' }, g);
+    const c = svg('circle', { r: 14, class: 'box anim' }, tg);
+    svg('text', { y: 4, 'text-anchor': 'middle', class: 'tok' }, tg, label);
+    return { g: tg, c };
+  }
+
+  function drawMarkWord(mw, hot) {
+    if (E.layout !== mw.layout) {
+      if (E.mwG) E.mwG.remove();
+      E.mwG = svg('g', { class: 'fadein' }, E.mwHost);
+      E.segs = {};
+      let x = BAR.x;
+      for (const [key, label, w] of LAYOUT[mw.layout]) {
+        const r = svg('rect', { x, y: BAR.y, width: w, height: BAR.h, rx: 4, class: 'box anim' }, E.mwG);
+        svg('text', { x: x + w / 2, y: BAR.y + 16, 'text-anchor': 'middle', class: 'small muted' }, E.mwG, label);
+        const v = svg('text', { x: x + w / 2, y: BAR.y + 35, 'text-anchor': 'middle', class: key === 'lock' ? 'lockbits' : 'mono' }, E.mwG, '');
+        E.segs[key] = { r, v };
+        x += w;
+      }
+      E.layout = mw.layout;
+    }
+    for (const key in E.segs) {
+      const S = E.segs[key];
+      S.v.textContent = mw.v[key] || '';
+      let cls = key === 'lock' ? LOCK_CLS(mw) : (key === 'thread' && mw.v.thread.startsWith('线程')) ? 'violet' : '';
+      if ((hot || []).includes(key)) cls = 'accent';
+      S.r.setAttribute('class', 'box anim ' + cls);
+    }
+    E.mwDesc.textContent = DESC[mw.layout === 'biased' ? 'biased' : mw.layout] + (mw.layout === 'biased' && !mw.v.thread.startsWith('线程') ? '（匿名）' : '');
+  }
+
+  Player({
+    scenarios,
+    dwell: 2900,
+    init(g, ctx) {
+      const sc = scenarios[ctx.scenario];
+      E = { layout: null, chips: [], cols: [], lrs: {}, tokens: {} };
+      // 阶段条
+      STAGES.forEach((name, k) => {
+        const x = 26 + k * 186;
+        const disabled = sc.noBias && k === 1;
+        const r = svg('rect', { x, y: 8, width: 150, height: 28, rx: 14, class: 'box anim' + (disabled ? ' dashed' : '') }, g);
+        const t = svg('text', { x: x + 75, y: 27, 'text-anchor': 'middle', class: disabled ? 'small muted' : '' }, g, disabled ? '偏向锁（已默认关闭）' : name);
+        if (k < 3) arrow(g, x + 154, 22, x + 182, 22, '');
+        E.chips.push({ r, t, disabled });
+      });
+      // 对象头
+      svg('rect', { x: 16, y: 48, width: 728, height: 96, rx: 10, class: 'box soft' }, g);
+      svg('text', { x: 30, y: 72, class: 'title' }, g, '对象头 Mark Word（64 位）');
+      E.mwDesc = svg('text', { x: 730, y: 72, 'text-anchor': 'end', class: 'mono c-accent' }, g, '');
+      E.mwHost = svg('g', {}, g);
+      // 线程栈
+      TH.forEach((name, k) => {
+        const x0 = COLX(k);
+        const box = svg('rect', { x: x0, y: 196, width: 164, height: 244, rx: 10, class: 'box anim soft' }, g);
+        svg('text', { x: x0 + 12, y: 220, class: 'title' }, g, `线程 ${name} 的栈`);
+        const st = svg('text', { x: x0 + 12, y: 246, class: 'small' }, g, '');
+        E.cols.push({ box, st });
+        E.lrs[name] = LR_Y.map(y => {
+          const lg = svg('g', { class: 'anim hide' }, g);
+          const r = svg('rect', { x: x0 + 10, y, width: 144, height: 50, rx: 6, class: 'box anim' }, lg);
+          svg('text', { x: x0 + 20, y: y + 19, class: 'small muted' }, lg, 'Lock Record');
+          const d = svg('text', { x: x0 + 20, y: y + 38, class: 'mono small' }, lg, '');
+          return { g: lg, r, d };
+        });
+      });
+      // ObjectMonitor
+      E.monBox = svg('rect', { x: MON.x, y: MON.y, width: MON.w, height: MON.h, rx: 10, class: 'box anim' }, g);
+      E.monG = svg('g', { class: 'anim' }, g);
+      svg('text', { x: MON.x + 12, y: MON.y + 24, class: 'title' }, g, 'ObjectMonitor');
+      [['_owner', 50], ['_recursions', 74]].forEach(([n, dy]) => svg('text', { x: MON.x + 12, y: MON.y + dy, class: 'mono small muted' }, E.monG, n));
+      E.monOwner = svg('text', { x: MON.x + 100, y: MON.y + 50, class: 'small' }, E.monG, '');
+      E.monRec = svg('text', { x: MON.x + 100, y: MON.y + 74, class: 'mono small' }, E.monG, '');
+      svg('text', { x: MON.x + 12, y: MON.y + 106, class: 'mono small muted' }, E.monG, '_EntryList');
+      svg('rect', { x: MON.x + 10, y: MON.y + 116, width: MON.w - 20, height: 56, rx: 6, class: 'box dashed' }, E.monG);
+      svg('text', { x: MON.x + 12, y: MON.y + 190, class: 'mono small muted' }, E.monG, '_WaitSet');
+      svg('rect', { x: MON.x + 10, y: MON.y + 198, width: MON.w - 20, height: 36, rx: 6, class: 'box dashed' }, E.monG);
+      E.monNone = svg('text', { x: MON.x + MON.w / 2, y: MON.y + MON.h / 2, 'text-anchor': 'middle', class: 'small muted' }, g, '未创建（膨胀时才分配）');
+      // 线程圆点
+      TH.forEach((name, k) => {
+        E.tokens[name] = token(g, name);
+        const p = SLOT.home(k);
+        move(E.tokens[name].g, p.x, p.y);
+      });
+      E.result = svg('text', { x: 380, y: 466, 'text-anchor': 'middle', class: 'title' }, g, '');
+    },
+    render(st, step, i, ctx) {
+      E.chips.forEach((c, k) => {
+        if (c.disabled) return;
+        c.r.setAttribute('class', 'box anim ' + (k === st.stage ? 'accent' : k < st.stage ? 'soft' : ''));
+        c.t.setAttribute('class', k === st.stage ? 'title c-accent' : k < st.stage ? 'muted' : '');
+      });
+      drawMarkWord(st.mw, step.mwHot);
+      TH.forEach((name, k) => {
+        const [cls, text] = st.th[name];
+        const C = E.cols[k];
+        C.box.setAttribute('class', 'box anim ' + (cls || 'soft'));
+        C.st.textContent = text;
+        C.st.setAttribute('class', 'small ' + (cls ? 'c-' + cls : 'muted'));
+        E.lrs[name].forEach((L, j) => {
+          const rec = st.lr[name][j];
+          L.g.classList.toggle('hide', !rec);
+          if (rec) L.d.textContent = rec.d;
+          L.r.setAttribute('class', 'box anim ' + (step.lrHot === name + j ? 'accent' : st.target === name && j === 0 ? 'ok' : ''));
+        });
+        const T = E.tokens[name];
+        const where = st.tok[name];
+        const p = SLOT[where](k);
+        move(T.g, p.x, p.y);
+        const tc = where === 'home' ? (cls || 'soft') : 'warn';
+        T.c.setAttribute('class', 'box anim ' + tc + (tc === 'warn' ? ' pulse' : ''));
+      });
+      // 自旋
+      if (step.spin) {
+        const k = TH.indexOf(step.spin), p = SLOT.home(k);
+        svg('circle', { cx: p.x, cy: p.y, r: 20, class: 'wire warn flow' }, ctx.fx);
+      }
+      // ObjectMonitor
+      const mon = st.mon;
+      E.monBox.setAttribute('class', 'box anim ' + (mon ? (step.monHot ? 'accent' : 'warn') : 'soft dashed'));
+      E.monG.style.opacity = mon ? 1 : 0;
+      E.monNone.style.display = mon ? 'none' : '';
+      E.monOwner.textContent = mon ? mon.owner || 'null' : '';
+      E.monRec.textContent = mon ? mon.rec : '';
+      // Mark Word 指针
+      if (st.target) {
+        const tx = st.target === 'mon' ? MON.x + MON.w / 2 : COLX(TH.indexOf(st.target)) + 118;
+        const ty = st.target === 'mon' ? MON.y : LR_Y[0];
+        arrow(ctx.fx, tx, BAR.y + BAR.h + 2, tx, ty - 2, st.target === 'mon' ? 'warn' : 'ok');
+      }
+      E.result.textContent = st.result || '';
+      E.result.setAttribute('class', 'title ' + (st.resultCls || ''));
+      const at = k => k.startsWith('tok') ? SLOT.home(TH.indexOf(k.slice(3))) : P[k];
+      for (const [from, to, label, cls] of step.moves || []) packet(ctx.fx, at(from), at(to), label, cls);
+    },
+  });
+})();
+</script>
+</body>
+</html>

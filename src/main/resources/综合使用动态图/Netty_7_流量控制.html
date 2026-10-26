@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Netty 7 · 流量控制（高低水位背压与读写控制）</title>
+<link rel="stylesheet" href="common.css">
+<style>
+.netty-nav{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:13px}
+.netty-nav a,.sources a{color:var(--accent);text-underline-offset:3px}
+.netty-nav [aria-current]{font-weight:700;text-decoration-thickness:2px}
+.sources{display:flex;flex-wrap:wrap;gap:8px 20px;font-size:13px}
+.stage .mono{font-family:var(--f-mono);font-size:12px}
+.stage .small{font-size:11px}
+.stage .title{font-size:13px}
+.now .desc{overflow-wrap:anywhere}
+@media(max-width:420px){.wrap{padding:18px 10px 32px}.panel{padding:12px}.ctl{flex-wrap:wrap}.controls{padding:10px}.netty-nav{gap:6px 12px}}
+</style>
+</head>
+<body>
+<main class="wrap">
+<header>
+<p class="eyebrow">Netty · 7 / 8 · 收发如何控速</p>
+<h1>流量控制（高低水位背压与读写控制）</h1>
+<p class="lede">高低水位是写缓冲积压的反馈信号，不是发送速率上限，也不是内存硬上限。超过高水位后 isWritable=false，应用仍可继续 write，因此生产者必须主动响应背压。autoRead 控制入站自动读取，是另一条控制路径。</p>
+</header>
+<nav class="netty-nav" aria-label="Netty 八个知识单元"><a href="Netty_1_线程模型.html">1. 线程模型</a>
+<a href="Netty_2_处理链.html">2. 处理链</a>
+<a href="Netty_3_内存.html">3. 内存</a>
+<a href="Netty_4_编解码.html">4. 编解码</a>
+<a href="Netty_5_异步结果.html">5. 异步结果</a>
+<a href="Netty_6_连接生命周期.html">6. 连接生命周期</a>
+<a href="Netty_7_流量控制.html" aria-current="page">7. 流量控制</a>
+<a href="Netty_8_传输层.html">8. 传输层</a></nav>
+<section class="controls" id="controls" aria-label="播放控制"></section>
+<div class="grid">
+<section class="panel stage">
+<div class="panel-h"><h2>运行过程与故障对照</h2><div class="legend"><span><i class="sw" style="background:var(--accent)"></i>当前处理</span><span><i class="sw" style="background:var(--warn)"></i>等待 / 压力</span><span><i class="sw" style="background:var(--bad)"></i>错误路径</span></div></div>
+<svg id="svg" viewBox="0 0 700 420" role="img" aria-label="流量控制的状态与消息流转动态图"></svg>
+<p class="cap">教学示意，时间与容量不按真实比例。切换场景可对照正常流程与故障；方向键逐步查看，空格暂停或播放。</p>
+</section>
+<aside class="col">
+<section class="panel now" aria-live="polite"><span class="k" id="nowNo"></span><h3 id="nowTitle"></h3><div class="desc" id="nowDesc"></div></section>
+<section class="panel"><div class="panel-h"><h2>关键代码 / 场景片段</h2></div><pre class="code" id="code"></pre></section>
+<section class="panel"><div class="panel-h"><h2>步骤</h2></div><ol class="steps" id="stepList"></ol></section>
+</aside>
+</div>
+<section class="panel notes"><div class="panel-h"><h2>最小知识单元</h2></div><div class="tablewrap"><table><thead><tr><th>概念</th><th>落地边界</th></tr></thead><tbody><tr><td>高 / 低水位</td><td>超过 high 变不可写；不可写状态下降到 low 以下才恢复。</td></tr>
+<tr><td>isWritable</td><td>当前写入压力信号；不会自动禁止 write，不等于网络即时可写。</td></tr>
+<tr><td>autoRead / read</td><td>入站自动读取开关 / 手动读取请求；需结合业务容量恢复。</td></tr></tbody></table></div></section>
+<section class="panel notes"><div class="panel-h"><h2>常见问题与排查</h2></div><div class="tablewrap"><table><thead><tr><th>现象</th><th>先检查什么 / 如何处理</th></tr></thead><tbody><tr><td>设置水位后仍内存暴涨</td><td>生产者未响应不可写，或把数据转移到无界应用队列。</td></tr>
+<tr><td>一直等不到恢复</td><td>必须监听 channelWritabilityChanged，并在低水位恢复后重启上游。</td></tr>
+<tr><td>吞吐正常但延迟很大</td><td>检查过大的批次、flush 时机、队列积压与 EL 长时间被单批任务占用。</td></tr>
+<tr><td>暂停读取后心跳超时</td><td>判活策略需区分业务停读与真实断连；不要无条件将出站压力映射到入站。</td></tr></tbody></table></div></section>
+<section class="panel"><div class="panel-h"><h2>官方参考 · Netty 4.1</h2></div><div class="sources"><a href="https://netty.io/4.1/api/io/netty/channel/WriteBufferWaterMark.html" target="_blank" rel="noopener noreferrer">WriteBufferWaterMark</a>
+<a href="https://netty.io/4.1/api/io/netty/channel/ChannelConfig.html" target="_blank" rel="noopener noreferrer">ChannelConfig</a></div><p class="cap">代码为说明机制的局部片段；示例中的业务类型、线程池、编解码器和指标方法由应用提供，标明伪代码的部分不是完整实现。</p></section>
+</main>
+<script src="player.js"></script>
+<script>window.NETTY_PAGE = {"name":"流量控制","mechanism":"高低水位背压与读写控制","question":"收发如何控速","kind":"flow","lede":"高低水位是写缓冲积压的反馈信号，不是发送速率上限，也不是内存硬上限。超过高水位后 isWritable=false，应用仍可继续 write，因此生产者必须主动响应背压。autoRead 控制入站自动读取，是另一条控制路径。","nodes":[["生产者","应用生成响应"],["Channel 写缓冲","估算待发字节"],["网络 / 对端","慢速消费"],["水位回调","channelWritabilityChanged"],["入站读取","autoRead / read"],["业务队列","有界 / 可拒绝"]],"edges":[[0,1],[1,2],[1,3],[3,0],[4,5]],"scenarios":[{"label":"慢对端：高水位暂停 / 低水位恢复","code":["b.childOption(ChannelOption.WRITE_BUFFER_WATER_MARK,","    new WriteBufferWaterMark(32 * 1024, 64 * 1024));","// 以下状态与生产均由同一 EventLoop 串行管理","public void channelWritabilityChanged(ChannelHandlerContext ctx) {","  if (ctx.channel().isWritable()) {","    producer.resume(); // 有界、分批，每批重新检查 writability","  } else {","    producer.pause();  // 停止生成，别改堆到无界内存队列","  }","  ctx.fireChannelWritabilityChanged();","}","// drain 时：while (有少量配额 && ch.isWritable() && 有数据) write","// 同一批结束 flush；下一批用任务调度，避免长期霸占循环"],"state":{"pending":16,"writable":true,"autoRead":true},"steps":[{"title":"正常发送：16 KiB","desc":"\u003cp>本页待发字节数是示意估算，真实水位统计可能包含消息开销。低水位 32 KiB，高水位 64 KiB；初始 isWritable=true。\u003c/p>","set":{"values":["持续生产","16 KiB","正常接收","writable=true","自动读取","容量可用"],"status":["","accent","","","",""],"pending":16,"writable":true,"autoRead":true},"line":[1,2]},{"title":"对端变慢：48 KiB","desc":"\u003cp>应用产出快于网络消费，积压增长但尚未超过高水位。此时仍是 writable，不能把“达到低水位”当作暂停条件。\u003c/p>","set":{"values":["持续生产","48 KiB","消费缓慢","仍为 true","自动读取","容量下降"],"status":["","accent","","","",""],"pending":48,"writable":true},"moves":[[0,1,"enqueue"]],"line":12},{"title":"超过高水位：80 KiB","desc":"\u003cp>估算待发字节超过 64 KiB，isWritable 切换为 false，触发可写性变化。Netty 发出信号，不会自动拒绝后续 write。\u003c/p>","set":{"values":["收到暂停信号","80 KiB","消费缓慢","writable=false","仍可自动读","停止追加"],"status":["","","","accent","",""],"pending":80,"writable":false},"moves":[[1,3,"false","warn"]],"line":[4,7,8]},{"title":"应用暂停生产","desc":"\u003cp>pause 必须作用于真实上游，避免只是把待发数据搬到另一个无界队列。已排队数据仍会在网络允许时继续发送。\u003c/p>","set":{"values":["已暂停","48 KiB","继续排空","仍为 false","按业务控制","保持有界"],"status":["accent","","","","",""],"pending":48,"writable":false},"line":8},{"title":"低于低水位：24 KiB","desc":"\u003cp>从不可写状态下降到低于 32 KiB，isWritable 才恢复 true。高低阈值形成滞回，减少频繁启停。\u003c/p>","set":{"values":["允许恢复","24 KiB","已恢复消费","writable=true","自动读取","可接受新数据"],"status":["","","","accent","",""],"pending":24,"writable":true},"moves":[[3,0,"resume","ok"]],"line":[5,6]}]},{"label":"入站过载：暂停 autoRead 与恢复","code":["// 应用示意：队列状态和 Channel 配置都在 EventLoop 更新","if (businessQueueAtHighMark()) {","  ctx.channel().config().setAutoRead(false);","}","// 业务完成后回到连接 EventLoop","ctx.executor().execute(() -> {","  if (businessQueueBelowLowMark() && ctx.channel().isActive()) {","    ctx.channel().config().setAutoRead(true);","  }","});","// 或 AUTO_READ=false 模式下按配额调用 ctx.read()","// 不能假定关闭自动读能撤销已经读取/传播的数据","// 高水位反馈不是内存硬上限，队列仍要有容量限制"],"state":{"pending":16,"writable":true,"autoRead":true},"steps":[{"title":"入站速度超过业务吞吐","desc":"\u003cp>业务队列达到高阈值时，首先对业务队列做有界控制与明确拒绝策略；写缓冲是否 writable 不能代表业务队列是否有容量。\u003c/p>","set":{"values":["正常生产","16 KiB","持续发请求","writable=true","持续读入","业务队列满"],"status":["","","","","","accent"],"pending":16,"writable":true,"autoRead":true},"line":2},{"title":"暂停后续自动读取","desc":"\u003cp>setAutoRead(false) 阻止后续自动 read，帮助把压力向 TCP 接收侧传递。已在当前批次读取或解码的消息仍可能继续到达。\u003c/p>","set":{"values":["按需生产","16 KiB","接收窗口可收紧","写侧仍可写","autoRead=false","消化存量"],"status":["","","","","accent",""],"pending":16,"writable":true,"autoRead":false},"line":[3,12]},{"title":"业务完成回到 EventLoop","desc":"\u003cp>处理完部分队列后，将恢复判断调度回 EventLoop。不能在这个回调里等待业务线程，否则又会阻塞 I/O。\u003c/p>","set":{"values":["按需生产","8 KiB","等待读取恢复","writable=true","暂时保持关闭","下降到低阈值"],"status":["","","","","","accent"],"pending":8,"autoRead":false},"moves":[[5,4,"capacity","ok"]],"line":[6,7]},{"title":"恢复自动读取","desc":"\u003cp>只有队列确实低于低阈值且连接仍活跃才恢复。心跳检测也要考虑暂停读取，避免把人为停读误判为远端失活。\u003c/p>","set":{"values":["按需生产","8 KiB","恢复传输","writable=true","autoRead=true","容量恢复"],"status":["","","","","accent",""],"pending":8,"writable":true,"autoRead":true},"line":[7,8]}]}],"concepts":[["高 / 低水位","超过 high 变不可写；不可写状态下降到 low 以下才恢复。"],["isWritable","当前写入压力信号；不会自动禁止 write，不等于网络即时可写。"],["autoRead / read","入站自动读取开关 / 手动读取请求；需结合业务容量恢复。"]],"issues":[["设置水位后仍内存暴涨","生产者未响应不可写，或把数据转移到无界应用队列。"],["一直等不到恢复","必须监听 channelWritabilityChanged，并在低水位恢复后重启上游。"],["吞吐正常但延迟很大","检查过大的批次、flush 时机、队列积压与 EL 长时间被单批任务占用。"],["暂停读取后心跳超时","判活策略需区分业务停读与真实断连；不要无条件将出站压力映射到入站。"]],"sources":[["WriteBufferWaterMark","https://netty.io/4.1/api/io/netty/channel/WriteBufferWaterMark.html"],["ChannelConfig","https://netty.io/4.1/api/io/netty/channel/ChannelConfig.html"]]};</script>
+<script src="netty-diagrams.js"></script>
+</body>
+</html>

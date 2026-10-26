@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Netty 5 · 异步结果（Future、Promise 与回调通知）</title>
+<link rel="stylesheet" href="common.css">
+<style>
+.netty-nav{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:13px}
+.netty-nav a,.sources a{color:var(--accent);text-underline-offset:3px}
+.netty-nav [aria-current]{font-weight:700;text-decoration-thickness:2px}
+.sources{display:flex;flex-wrap:wrap;gap:8px 20px;font-size:13px}
+.stage .mono{font-family:var(--f-mono);font-size:12px}
+.stage .small{font-size:11px}
+.stage .title{font-size:13px}
+.now .desc{overflow-wrap:anywhere}
+@media(max-width:420px){.wrap{padding:18px 10px 32px}.panel{padding:12px}.ctl{flex-wrap:wrap}.controls{padding:10px}.netty-nav{gap:6px 12px}}
+</style>
+</head>
+<body>
+<main class="wrap">
+<header>
+<p class="eyebrow">Netty · 5 / 8 · 结果怎么拿</p>
+<h1>异步结果（Future、Promise 与回调通知）</h1>
+<p class="lede">Future 用于观察最终结果，Promise 允许生产者完成结果，Listener 在完成后得到通知。写操作返回并不表示已写完；本地 write Future 成功也不等于远端业务已成功处理。</p>
+</header>
+<nav class="netty-nav" aria-label="Netty 八个知识单元"><a href="Netty_1_线程模型.html">1. 线程模型</a>
+<a href="Netty_2_处理链.html">2. 处理链</a>
+<a href="Netty_3_内存.html">3. 内存</a>
+<a href="Netty_4_编解码.html">4. 编解码</a>
+<a href="Netty_5_异步结果.html" aria-current="page">5. 异步结果</a>
+<a href="Netty_6_连接生命周期.html">6. 连接生命周期</a>
+<a href="Netty_7_流量控制.html">7. 流量控制</a>
+<a href="Netty_8_传输层.html">8. 传输层</a></nav>
+<section class="controls" id="controls" aria-label="播放控制"></section>
+<div class="grid">
+<section class="panel stage">
+<div class="panel-h"><h2>运行过程与故障对照</h2><div class="legend"><span><i class="sw" style="background:var(--accent)"></i>当前处理</span><span><i class="sw" style="background:var(--warn)"></i>等待 / 压力</span><span><i class="sw" style="background:var(--bad)"></i>错误路径</span></div></div>
+<svg id="svg" viewBox="0 0 700 420" role="img" aria-label="异步结果的状态与消息流转动态图"></svg>
+<p class="cap">教学示意，时间与容量不按真实比例。切换场景可对照正常流程与故障；方向键逐步查看，空格暂停或播放。</p>
+</section>
+<aside class="col">
+<section class="panel now" aria-live="polite"><span class="k" id="nowNo"></span><h3 id="nowTitle"></h3><div class="desc" id="nowDesc"></div></section>
+<section class="panel"><div class="panel-h"><h2>关键代码 / 场景片段</h2></div><pre class="code" id="code"></pre></section>
+<section class="panel"><div class="panel-h"><h2>步骤</h2></div><ol class="steps" id="stepList"></ol></section>
+</aside>
+</div>
+<section class="panel notes"><div class="panel-h"><h2>最小知识单元</h2></div><div class="tablewrap"><table><thead><tr><th>概念</th><th>落地边界</th></tr></thead><tbody><tr><td>ChannelFuture</td><td>Channel I/O 的结果；不是远端业务结果。</td></tr>
+<tr><td>Promise</td><td>可由生产者成功或失败完成的 Future；trySuccess / tryFailure 适合竞争。</td></tr>
+<tr><td>Listener</td><td>异步结果通知；不要在监听器中做阻塞或重型计算。</td></tr></tbody></table></div></section>
+<section class="panel notes"><div class="panel-h"><h2>常见问题与排查</h2></div><div class="tablewrap"><table><thead><tr><th>现象</th><th>先检查什么 / 如何处理</th></tr></thead><tbody><tr><td>isSuccess 刚调用就为 false</td><td>可能尚未完成；用 listener 或结合 isDone 判断状态。</td></tr>
+<tr><td>回调卡住整个连接组</td><td>检查 listener 中的阻塞操作以及在 EventLoop 上的 sync / await。</td></tr>
+<tr><td>请求长期挂起</td><td>配置业务 ACK 超时，异常和断连时完成并移除 pending。</td></tr>
+<tr><td>超时后重复执行业务</td><td>区分“未收到响应”与“远端未执行”，重试依赖幂等设计。</td></tr></tbody></table></div></section>
+<section class="panel"><div class="panel-h"><h2>官方参考 · Netty 4.1</h2></div><div class="sources"><a href="https://netty.io/4.1/api/io/netty/channel/ChannelFuture.html" target="_blank" rel="noopener noreferrer">ChannelFuture</a>
+<a href="https://netty.io/4.1/api/io/netty/util/concurrent/Promise.html" target="_blank" rel="noopener noreferrer">Promise</a></div><p class="cap">代码为说明机制的局部片段；示例中的业务类型、线程池、编解码器和指标方法由应用提供，标明伪代码的部分不是完整实现。</p></section>
+</main>
+<script src="player.js"></script>
+<script>window.NETTY_PAGE = {"name":"异步结果","mechanism":"Future、Promise 与回调通知","question":"结果怎么拿","kind":"future","lede":"Future 用于观察最终结果，Promise 允许生产者完成结果，Listener 在完成后得到通知。写操作返回并不表示已写完；本地 write Future 成功也不等于远端业务已成功处理。","nodes":[["调用方","发起异步操作"],["Future / Promise","待完成 / 单次完成"],["EventLoop","执行实际 I/O"],["Listener","成功 / 失败回调"],["远端应用","业务处理与 ACK"],["超时任务","竞争完成 Promise"]],"edges":[[0,1],[1,2],[2,3],[2,4],[5,1]],"scenarios":[{"label":"异步 write：返回 / 完成 / 远端 ACK","code":["ChannelFuture f = ctx.writeAndFlush(response);","f.addListener((ChannelFutureListener) done -> {","  if (done.isSuccess()) {","    recordLocalWriteSuccess(); // 示例：本地指标","  } else {","    recordFailure(done.cause());","    done.channel().close();","  }","});","// 远端业务结果需要独立的 requestId + ACK + 超时","// EventLoop 回调内不要 f.sync() / await() / get()"],"state":{},"steps":[{"title":"立即返回 Future","desc":"\u003cp>writeAndFlush 提交操作并返回 ChannelFuture。刚返回时可能完成也可能尚未完成，不能马上只看 isSuccess 就判断失败。\u003c/p>","set":{"values":["拿到 Future","PENDING","准备发送","已注册","尚未收到","独立业务超时"],"status":["","accent","","","",""],"result":"PENDING"},"line":[1,2]},{"title":"执行本地写操作","desc":"\u003cp>EventLoop 驱动传输层发送数据。监听器处理结果，无需阻塞等待；监听器本身也要保持轻量。\u003c/p>","set":{"values":["继续工作","PENDING","正在写入","等待完成","可能尚未读取","继续计时"],"status":["","","accent","","",""],"result":"PENDING"},"moves":[[1,2,"write"]],"line":1},{"title":"写 Future 成功","desc":"\u003cp>本地传输写操作完成，Future 变为成功。它没有证明远端业务处理成功，也不等于收到应用层 ACK。\u003c/p>","set":{"values":["可观察结果","SUCCESS","本地写完成","记录本地指标","业务结果未知","ACK 超时仍独立"],"status":["","","","accent","",""],"result":"SUCCESS（本地写）"},"moves":[[2,3,"success","ok"]],"line":[3,4]},{"title":"单独处理远端 ACK","desc":"\u003cp>请求响应协议应以 requestId 关联响应。远端 ACK 到达后，完成对应业务 Promise；网络失败与业务失败应分开记录。\u003c/p>","set":{"values":["业务请求完成","业务 Promise 成功","收到响应","通知业务结果","返回业务 ACK","取消 ACK 超时"],"status":["","","","","accent",""],"result":"业务 ACK 成功"},"moves":[[4,0,"ACK","ok"]],"line":10},{"title":"失败路径也必须处理","desc":"\u003cp>如果连接关闭导致写失败，应读取 cause 并清理状态。已发送过的业务请求是否重试，还取决于幂等性与远端是否已执行。\u003c/p>","set":{"values":["获知失败","FAILURE","连接不可用","记录 cause","处理结果可能未知","清理请求状态"],"status":["","","","accent","",""],"result":"FAILURE（另一种结果）"},"line":[5,6,7]}]},{"label":"Promise：响应与超时竞争","code":["Promise\u003cString> result = ctx.executor().newPromise();","ScheduledFuture\u003c?> timer = ctx.executor().schedule(() -> {","  result.tryFailure(new TimeoutException(\"ACK timeout\"));","}, 3, TimeUnit.SECONDS);","result.addListener(done -> {","  timer.cancel(false);","  pending.remove(requestId); // pending 由同一个执行器访问","  // done.isSuccess() ? 处理结果 : 处理异常","});","pending.put(requestId, result);","// 收到匹配 ACK 时，在同一执行器上：","Promise\u003cString> p = pending.get(requestId);","if (p != null) p.trySuccess(ackValue);","// 关闭连接时遍历 pending，tryFailure 并清理"],"state":{},"steps":[{"title":"创建业务 Promise 与超时","desc":"\u003cp>Promise 是可完成的 Future。此片段假定当前已在 ctx.executor() 上，requestId 唯一，pending 也由这个执行器管理。\u003c/p>","set":{"values":["发出带 ID 请求","PENDING","管理 pending","已注册监听","处理请求","3 秒后到期"],"status":["","accent","","","",""],"result":"PENDING"},"line":[1,2,3,10]},{"title":"超时先到","desc":"\u003cp>未在期限内收到 ACK，定时任务 tryFailure 成功，将结果从 PENDING 变为 FAILURE。Future 等待超时与业务主动完成超时不是一回事。\u003c/p>","set":{"values":["等待结果","FAILURE","移除 pending","处理 Timeout","结果仍未知","赢得完成竞争"],"status":["","","","","","accent"],"result":"FAILURE / TimeoutException"},"moves":[[5,1,"timeout","warn"]],"line":[3,7]},{"title":"迟到 ACK 不得重复完成","desc":"\u003cp>pending 已移除时忽略迟到 ACK。若其他回调仍保留 Promise 引用，trySuccess 返回 false；setSuccess 则会因已完成抛出异常。\u003c/p>","set":{"values":["已通知超时","仍为 FAILURE","忽略迟到响应","不重复通知","ACK 迟到","已完成"],"status":["","accent","","","",""],"result":"FAILURE（不再变化）"},"moves":[[4,1,"late ACK","warn"]],"line":[12,13]},{"title":"反过来：ACK 先到","desc":"\u003cp>若 ACK 先到，trySuccess 成功，监听器取消超时并删除 pending。连接关闭也要让所有未完成请求得到失败结果。\u003c/p>","set":{"values":["收到业务结果","SUCCESS","清理 pending","通知一次","ACK 已到达","已取消"],"status":["","","","accent","",""],"result":"SUCCESS（ACK 先到的分支）"},"moves":[[4,1,"ACK","ok"]],"line":[6,7,13,14]}]}],"concepts":[["ChannelFuture","Channel I/O 的结果；不是远端业务结果。"],["Promise","可由生产者成功或失败完成的 Future；trySuccess / tryFailure 适合竞争。"],["Listener","异步结果通知；不要在监听器中做阻塞或重型计算。"]],"issues":[["isSuccess 刚调用就为 false","可能尚未完成；用 listener 或结合 isDone 判断状态。"],["回调卡住整个连接组","检查 listener 中的阻塞操作以及在 EventLoop 上的 sync / await。"],["请求长期挂起","配置业务 ACK 超时，异常和断连时完成并移除 pending。"],["超时后重复执行业务","区分“未收到响应”与“远端未执行”，重试依赖幂等设计。"]],"sources":[["ChannelFuture","https://netty.io/4.1/api/io/netty/channel/ChannelFuture.html"],["Promise","https://netty.io/4.1/api/io/netty/util/concurrent/Promise.html"]]};</script>
+<script src="netty-diagrams.js"></script>
+</body>
+</html>

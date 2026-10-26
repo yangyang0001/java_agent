@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mark Word 动态图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+<style>
+  .code { font-size: 11.5px; }
+  .stage .seg { transition: x .6s cubic-bezier(.4, 0, .2, 1), width .6s cubic-bezier(.4, 0, .2, 1), fill .4s ease, stroke .4s ease, opacity .4s ease; }
+  .stage text.big { font-family: var(--f-mono); font-size: 17px; font-weight: 600; }
+  .stage .bracket { fill: none; stroke: var(--muted); stroke-width: 1; }
+  @media (prefers-reduced-motion: reduce) { .stage .seg { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">JVM · 6 · Mark Word</p>
+    <h1>对象头与 Mark Word：同样 64 位，随锁状态复用</h1>
+    <p class="lede">对象 = 对象头 + 实例数据 + 对齐填充。对象头里的 Mark Word 占 8 字节，最后 2 位是锁标志位：无锁和偏向锁时存 hashCode、分代年龄或线程 ID；轻量级锁和重量级锁时，前 62 位变成指向 Lock Record 或 ObjectMonitor 的指针。</p>
+  </header>
+
+  <section class="controls" id="controls" aria-label="播放控制"></section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel stage">
+        <div class="panel-h">
+          <h2>对象头与 Mark Word 的位布局</h2>
+          <div class="legend">
+            <span><i class="sw" style="background:var(--accent)"></i>本步变化</span>
+            <span><i class="sw" style="background:var(--ok)"></i>无锁</span>
+            <span><i class="sw" style="background:var(--violet)"></i>偏向锁</span>
+            <span><i class="sw" style="background:var(--warn)"></i>轻量级锁</span>
+            <span><i class="sw" style="background:var(--bad)"></i>重量级锁</span>
+          </div>
+        </div>
+        <svg id="svg" viewBox="0 0 760 490" role="img" aria-label="64 位 Mark Word 的各个字段随锁状态变化，以及 Lock Record、ObjectMonitor 和分代年龄的变化"></svg>
+        <p class="cap">64 位 JVM、开启压缩类指针（默认）。Mark Word 高 56 位按比例画出，低 8 位放大显示。JDK 15 起偏向锁默认关闭（JEP 374），这里按 JDK 8 演示。</p>
+      </section>
+    </div>
+
+    <aside class="col">
+      <section class="panel now">
+        <span class="k" id="nowNo"></span>
+        <h3 id="nowTitle"></h3>
+        <div class="desc" id="nowDesc"></div>
+      </section>
+      <section class="panel"><div class="panel-h"><h2>代码</h2></div><pre class="code" id="code"></pre></section>
+      <section class="panel">
+        <div class="panel-h"><h2>步骤</h2></div>
+        <ol class="steps" id="stepList"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <section class="panel notes">
+    <div class="panel-h"><h2>要点</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>状态</th><th>Mark Word 内容（64 位）</th><th>偏向位</th><th>锁标志</th></tr></thead>
+        <tbody>
+          <tr><td>无锁</td><td><code>unused:25 | hashcode:31 | unused:1 | age:4</code></td><td>0</td><td>01</td></tr>
+          <tr><td>偏向锁</td><td><code>threadId:54 | epoch:2 | unused:1 | age:4</code></td><td>1</td><td>01</td></tr>
+          <tr><td>轻量级锁</td><td>指向栈中 Lock Record 的指针:62</td><td>-</td><td>00</td></tr>
+          <tr><td>重量级锁</td><td>指向 ObjectMonitor 的指针:62</td><td>-</td><td>10</td></tr>
+          <tr><td>GC 标记</td><td>空</td><td>-</td><td>11</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul style="margin-top:10px">
+      <li>对象内存布局：对象头 + 实例数据 + 对齐填充（对象大小必须是 8 字节的整数倍）。对象头 = Mark Word 8 字节 + 类型指针（压缩时 4 字节，否则 8 字节）+ 数组长度 4 字节（仅数组）。</li>
+      <li><code>new Object()</code> 占 16 字节：Mark Word 8 + 类型指针 4 + 对齐填充 4，可用 JOL 验证。</li>
+      <li>分代年龄只有 4 位，最大 15，所以 <code>-XX:MaxTenuringThreshold</code> 不能超过 15。</li>
+      <li>只有无锁状态才有位置存 hashCode，计算过 hashCode 的对象不能再偏向；轻量级 / 重量级锁时 hashCode 保存在 Lock Record / ObjectMonitor 中。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="player.js"></script>
+<script>
+(() => {
+  const { svg, move } = Player;
+  // 飞行小包裹：到达后淡出，不遮挡目标文字
+  function fly(fx, from, to, label, cls) {
+    const g = svg('g', { class: 'anim' }, fx);
+    move(g, from.x, from.y);
+    svg('circle', { r: 7, class: 'dot ' + (cls || '') }, g);
+    if (label) svg('text', { x: 11, y: -9, class: 'mono small c-' + (cls || 'accent') }, g, label);
+    g.getBoundingClientRect();
+    requestAnimationFrame(() => requestAnimationFrame(() => move(g, to.x, to.y)));
+    setTimeout(() => g.classList.add('hide'), 1100);
+  }
+  const BX = 30, BW = 600, PB = BW / 56, BY = 124, BH = 44;
+  const ZX = 270, ZW = 57.5, ZY = 224;
+  const MODES = ['nolock', 'biased', 'thin', 'heavy', 'gc'];
+  const MCLS = { nolock: 'ok', biased: 'violet', thin: 'warn', heavy: 'bad', gc: 'soft' };
+  const ageBits = a => a.toString(2).padStart(4, '0').split('');
+
+  function layout(st) {
+    const age = ageBits(st.age);
+    switch (st.mode) {
+      case 'nolock': return {
+        high: [{ n: 'unused', b: 25, v: '0', l: '25 位' }, { n: 'identity hashcode', b: 31, v: st.hash || '0（还没算过）', l: '31 位' }],
+        low: ['0', ...age, '0', '0', '1'], groups: [['unused', 0, 1], ['age', 1, 4], ['biased', 5, 1], ['lock', 6, 2]],
+        badge: '无锁 · 001', bc: 'c-ok' };
+      case 'biased': return {
+        high: [{ n: 'thread ID（JavaThread*）', b: 54, v: st.tid, l: '54 位' }, { n: '', b: 2, v: '00', l: 'epoch' }],
+        low: ['0', ...age, '1', '0', '1'], groups: [['unused', 0, 1], ['age', 1, 4], ['biased', 5, 1], ['lock', 6, 2]],
+        badge: st.tid === '0' ? '可偏向（匿名偏向）· 101' : '偏向锁 · 101', bc: 'c-violet' };
+      case 'thin': return {
+        high: [{ n: 'ptr_to_lock_record', b: 56, v: '→ 栈帧中的 Lock Record', l: '62 位指针 = 高 56 + 低 6 位' }],
+        low: ['p', 'p', 'p', 'p', 'p', 'p', '0', '0'], groups: [['指针低 6 位', 0, 6], ['lock', 6, 2]],
+        badge: '轻量级锁 · 00', bc: 'c-warn' };
+      case 'heavy': return {
+        high: [{ n: 'ptr_to_heavyweight_monitor', b: 56, v: '→ ObjectMonitor', l: '62 位指针 = 高 56 + 低 6 位' }],
+        low: ['p', 'p', 'p', 'p', 'p', 'p', '1', '0'], groups: [['指针低 6 位', 0, 6], ['lock', 6, 2]],
+        badge: '重量级锁 · 10', bc: 'c-bad' };
+      default: return {
+        high: [{ n: '空（由 GC 使用）', b: 56, v: '', l: '62 位' }],
+        low: ['', '', '', '', '', '', '1', '1'], groups: [['空', 0, 6], ['lock', 6, 2]],
+        badge: 'GC 标记 · 11', bc: 'muted' };
+    }
+  }
+
+  const S1 = { mode: 'nolock', hash: '', age: 0, tid: '0', lr: false, mon: false, t1: '', t2: '', ref: '' };
+  const sc1 = {
+    label: '锁升级：无锁 → 偏向 → 轻量级 → 重量级',
+    code: ['Object lock = new Object();', '// JDK8 默认开启偏向锁（延迟 4 秒）', '// 线程 T1：', 'synchronized (lock) { ... }', 'synchronized (lock) { ... } // 再次进入',
+      '// 线程 T2（T1 已退出）：', 'synchronized (lock) { ... }', '// T2 还没退出，T1 又来：', 'synchronized (lock) { ... }'],
+    state: S1,
+    steps: [
+      { title: 'new Object()：16 字节', line: 1, hotLayout: true,
+        desc: '<p>对象头 = <b>Mark Word 8 字节</b> + <b>类型指针 4 字节</b>（开启压缩类指针）。</p><p>Object 没有实例字段，12 字节不是 8 的倍数，补 <b>4 字节对齐填充</b>，共 16 字节（可用 JOL 验证）。</p>' },
+      { title: '无锁：最后 2 位是 01', line: 1, hotBits: [5, 6, 7],
+        desc: '<p>无锁时：<code>unused:25 | hashcode:31 | unused:1 | age:4 | biased:1 | lock:2</code>。</p><p>还没调用过 <code>hashCode()</code>，hash 位全是 0；偏向位 0，锁标志 <b>01</b>。</p>' },
+      { title: '开启偏向锁：匿名偏向 101', line: 2, hotBits: [5], hotSeg: 0,
+        desc: '<p>JDK8 默认开启偏向锁，启动约 4 秒后（<code>BiasedLockingStartupDelay</code>）新建的对象，偏向位直接是 <b>1</b>、线程 ID 为 0。</p><p>表示"可以偏向，但还没偏向任何线程"。</p>',
+        set: { mode: 'biased' } },
+      { title: 'T1 加锁：CAS 写入线程 ID', line: [3, 4], hotSeg: 0, moves: [['t1', 'seg0', 'CAS 写入 T1', 'violet']],
+        desc: '<p>T1 第一次进入 <code>synchronized</code>：用一次 CAS 把自己的线程指针写进 Mark Word。</p><p>对象从此<b>偏向 T1</b>，锁标志仍是 01。</p>',
+        set: { tid: 'T1', t1: '持有偏向锁', ref: 't1' } },
+      { title: 'T1 再次进入：只比较线程 ID', line: 5, hotSeg: 0,
+        desc: '<p>T1 再加锁时只检查 Mark Word 里的线程 ID 是不是自己，<b class="ok">不需要 CAS</b>。</p><p>这就是偏向锁的意义：只有一个线程反复加锁时几乎零开销。</p>',
+        set: { t1: '再次进入：比较线程 ID，无 CAS' } },
+      { title: 'T2 来加锁：撤销偏向，升级轻量级锁', line: [6, 7], hotSeg: 0, hotBits: [6, 7], moves: [['seg0', 'lr', '复制 Mark Word', 'warn']],
+        desc: '<p>另一个线程来了，偏向被<b>撤销</b>（需要在安全点进行）。</p><p>T2 在自己的栈帧里建 <b>Lock Record</b>，把无锁的 Mark Word 复制进去（Displaced Mark Word），再 CAS 把 Mark Word 换成<b>指向 Lock Record 的指针</b>，锁标志 <b>00</b>。</p>',
+        set: { mode: 'thin', lr: true, t1: '已退出同步块', t2: '持有轻量级锁', ref: 'lr' } },
+      { title: '竞争：膨胀为重量级锁', line: [8, 9], hotSeg: 0, hotBits: [6, 7], moves: [['t1', 'mon', '竞争', 'bad']],
+        desc: '<p>T2 还没退出，T1 又来加锁，CAS 失败 → <b>锁膨胀</b>，创建 <code>ObjectMonitor</code>。</p><p>Mark Word 改为<b>指向 ObjectMonitor 的指针</b>，锁标志 <b>10</b>；原来的 Mark Word 保存在 monitor 的 <code>_header</code>。</p><p class="bad">T1 自适应自旋仍拿不到锁，就进入队列 park 阻塞，涉及用户态 / 内核态切换。</p>',
+        set: { mode: 'heavy', mon: true, t1: '自旋失败 → 阻塞', ref: 'mon' } },
+      { title: '另一种状态：GC 标记 11', hotBits: [6, 7], dwell: 3600,
+        desc: '<p>和锁无关：对象在 GC 过程中被标记（例如复制时存放转发指针）时，最后两位是 <b>11</b>，其余位由 GC 使用。</p><p>五种状态正好用最后 2 位（加偏向位）区分开。</p>',
+        set: { mode: 'gc', lr: false, mon: false, t1: '', t2: '', ref: '' } },
+    ],
+  };
+
+  const sc2 = {
+    label: '分代年龄与 hashCode',
+    code: ['Object obj = new Object();', '// 多次 Minor GC 后仍存活', 'int h = obj.hashCode();', 'synchronized (obj) { ... }',
+      '// 如果对象正偏向 T1：', 'synchronized (obj) {', '    obj.hashCode(); // 撤销偏向', '}'],
+    state: { ...S1, zone: 'eden' },
+    steps: [
+      { title: '新对象：age = 0', line: 1, hotBits: [1, 2, 3, 4],
+        desc: '<p>对象在 Eden 中分配（这里按无锁 001 演示），Mark Word 里 4 位的 age 是 <code>0000</code>。</p>' },
+      { title: 'Minor GC：进入 Survivor，age = 1', line: 2, hotBits: [1, 2, 3, 4],
+        desc: '<p>熬过一次 Minor GC，被复制到 Survivor 区，<b>age + 1</b>。</p>',
+        set: { age: 1, zone: 's0' } },
+      { title: '再熬过一次，age = 2', line: 2, hotBits: [1, 2, 3, 4],
+        desc: '<p>每次 Minor GC 在两个 Survivor 之间复制一次，age 再加 1。</p>',
+        set: { age: 2, zone: 's1' } },
+      { title: 'age 一直涨到 15', line: 2, hotBits: [1, 2, 3, 4],
+        desc: '<p>age 只有 <b>4 位</b>，最大值是 <code>1111</code> = <b>15</b>。</p>',
+        set: { age: 15, zone: 's0' } },
+      { title: '达到阈值：晋升老年代', line: 2, hotBits: [1, 2, 3, 4],
+        desc: '<p>age 达到 <code>-XX:MaxTenuringThreshold</code>（默认 15）就晋升到老年代。</p><p>因为只有 4 位，<b>这个参数不能超过 15</b>。</p>',
+        set: { zone: 'old' } },
+      { title: '调用 hashCode()：写入 31 位', line: 3, hotSeg: 1,
+        desc: '<p>第一次调用 <code>Object.hashCode()</code>（identity hash）时生成并写入 Mark Word 的 31 位 hashcode。</p><p>重写过的 <code>hashCode()</code> 不会写这里。</p>',
+        set: { hash: '0x2a139a55' } },
+      { title: 'synchronized：不能偏向，直接轻量级锁', line: 4, hotSeg: 0, hotBits: [6, 7], moves: [['seg0', 'lr', 'hash + age', 'warn']],
+        desc: '<p>偏向锁要把线程 ID 写在 hashcode 的位置，<b class="bad">已经有 hashCode 就没地方放</b>，所以不能偏向，直接加轻量级锁。</p><p>hashCode 和 age 随 Mark Word 一起保存在 Lock Record 的 Displaced Mark Word 中。</p>',
+        set: { mode: 'thin', lr: true, ref: 'lr', t2: '' } },
+      { title: '退出同步块：写回 Mark Word', line: 4, hotSeg: 1, moves: [['lr', 'seg1', '写回', 'ok']],
+        desc: '<p>解锁时 CAS 把 Displaced Mark Word 写回对象头，恢复无锁，<b class="ok">hashCode 和 age 都还在</b>。</p>',
+        set: { mode: 'nolock', lr: false, ref: '' } },
+      { title: '对比：对象正偏向 T1', line: [5, 6], hotSeg: 0,
+        desc: '<p>换一个还没算过 hashCode、正偏向 T1 的对象。</p><p>此时 hashcode 的位置被线程 ID 占着。</p>',
+        set: { mode: 'biased', tid: 'T1', hash: '', ref: '' } },
+      { title: '同步块内调用 hashCode()：膨胀', line: 7, hotSeg: 0, hotBits: [6, 7],
+        desc: '<p>偏向状态下调用 <code>hashCode()</code> 会<b>撤销偏向</b>：不在同步块中就恢复无锁再写 hash；正在同步块中则直接<b class="bad">膨胀为重量级锁</b>。</p><p>hashCode 保存在 ObjectMonitor 的 <code>_header</code> 中。</p>',
+        set: { mode: 'heavy', mon: true, ref: 'mon' }, dwell: 3800 },
+    ],
+  };
+
+  let E;
+  const Y_BOT = s => s === 0 ? 345 : 335;
+
+  Player({
+    scenarios: [sc1, sc2],
+    dwell: 3000,
+    init(g, ctx) {
+      const sc = ctx.scenario;
+      E = { anchors: {} };
+      // 对象内存布局
+      svg('text', { x: BX, y: 20, class: 'small muted' }, g, '对象内存布局：new Object()（16 字节）');
+      E.layout = svg('g', {}, g);
+      const parts = [['Mark Word', 8, 'accent'], ['Klass Pointer', 4, 'violet'], ['对齐填充', 4, 'soft dashed']];
+      let off = 0;
+      for (const [n, b, c] of parts) {
+        const x = BX + off * 40;
+        svg('rect', { x, y: 28, width: b * 40 - 2, height: 30, rx: 4, class: 'box ' + c }, E.layout);
+        svg('text', { x: x + b * 20, y: 48, 'text-anchor': 'middle', class: 'small' }, E.layout, `${n} · ${b} 字节`);
+        off += b;
+      }
+      [0, 8, 12, 16].forEach(b => svg('text', { x: BX + b * 40, y: 72, 'text-anchor': b ? 'middle' : 'start', class: 'small muted' }, E.layout, b + 'B'));
+      E.layoutHi = svg('rect', { x: BX - 4, y: 24, width: 648, height: 38, rx: 6, class: 'box accent anim hide', style: 'fill: none; stroke-width: 2' }, g);
+
+      // Mark Word 主条
+      svg('text', { x: BX, y: 108, class: 'title' }, g, 'Mark Word（64 位）');
+      E.badge = svg('text', { x: 730, y: 108, 'text-anchor': 'end', class: 'title' }, g, '');
+      E.segs = [0, 1].map(() => {
+        const rect = svg('rect', { y: BY, height: BH, rx: 4, class: 'box seg' }, g);
+        const tg = svg('g', { class: 'anim' }, g);
+        const name = svg('text', { x: 0, y: BY + 18, 'text-anchor': 'middle', class: 'small' }, tg, '');
+        const val = svg('text', { x: 0, y: BY + 36, 'text-anchor': 'middle', class: 'mono' }, tg, '');
+        const bits = svg('text', { x: 0, y: BY + BH + 15, 'text-anchor': 'middle', class: 'small muted' }, tg, '');
+        return { rect, tg, name, val, bits };
+      });
+      E.lowBox = svg('rect', { x: BX + BW, y: BY, width: 100, height: BH, rx: 4, class: 'box seg' }, g);
+      svg('text', { x: BX + BW + 50, y: BY + 27, 'text-anchor': 'middle', class: 'small' }, g, '低 8 位 ↓');
+      // 放大低 8 位
+      svg('line', { x1: BX + BW, y1: BY + BH, x2: ZX, y2: ZY, class: 'wire dashed' }, g);
+      svg('line', { x1: BX + BW + 100, y1: BY + BH, x2: ZX + 8 * ZW, y2: ZY, class: 'wire dashed' }, g);
+      E.cells = [];
+      for (let k = 0; k < 8; k++) {
+        const x = ZX + k * ZW;
+        const rect = svg('rect', { x: x + 1, y: ZY, width: ZW - 2, height: 40, rx: 4, class: 'box anim' }, g);
+        const t = svg('text', { x: x + ZW / 2, y: ZY + 27, 'text-anchor': 'middle', class: 'big' }, g, '');
+        E.cells.push({ rect, t });
+      }
+      E.groups = svg('g', {}, g);
+
+      // 状态表
+      svg('rect', { x: BX, y: 196, width: 196, height: 128, rx: 8, class: 'box soft' }, g);
+      svg('text', { x: 42, y: 214, class: 'small muted' }, g, '状态');
+      svg('text', { x: 148, y: 214, 'text-anchor': 'middle', class: 'small muted' }, g, '偏向位');
+      svg('text', { x: 200, y: 214, 'text-anchor': 'middle', class: 'small muted' }, g, '锁标志');
+      E.rowHi = svg('rect', { x: BX + 4, y: 0, width: 188, height: 20, rx: 4, class: 'box accent anim' }, g);
+      [['无锁', '0', '01'], ['偏向锁', '1', '01'], ['轻量级锁', '-', '00'], ['重量级锁', '-', '10'], ['GC 标记', '-', '11']].forEach(([n, b, l], k) => {
+        const y = 234 + k * 18;
+        svg('text', { x: 42, y, class: 'small' }, g, n);
+        svg('text', { x: 148, y, 'text-anchor': 'middle', class: 'mono small' }, g, b);
+        svg('text', { x: 200, y, 'text-anchor': 'middle', class: 'mono small' }, g, l);
+      });
+
+      // 下方：线程 / Lock Record / ObjectMonitor / 堆
+      E.ptr = svg('g', {}, g);
+      if (sc === 0) {
+        svg('rect', { x: BX, y: 345, width: 196, height: 135, rx: 8, class: 'box' }, g);
+        svg('text', { x: 44, y: 366, class: 'title' }, g, '线程 T1');
+        E.t1 = svg('text', { x: 44, y: 390, class: 'small c-accent' }, g, '');
+        svg('rect', { x: 270, y: 345, width: 210, height: 135, rx: 8, class: 'box' }, g);
+        svg('text', { x: 284, y: 366, class: 'title' }, g, '线程 T2 · 栈帧');
+        E.t2 = svg('text', { x: 284, y: 386, class: 'small c-accent' }, g, '');
+        E.lr = svg('g', { class: 'anim hide' }, g);
+        svg('rect', { x: 282, y: 396, width: 186, height: 72, rx: 6, class: 'box warn' }, E.lr);
+        svg('text', { x: 294, y: 416, class: 'small title' }, E.lr, 'Lock Record');
+        svg('text', { x: 294, y: 436, class: 'small' }, E.lr, 'Displaced Mark Word：');
+        svg('text', { x: 294, y: 456, class: 'mono small' }, E.lr, '原无锁 Mark Word（001）');
+        E.mon = svg('g', { class: 'anim hide' }, g);
+        svg('rect', { x: 500, y: 345, width: 230, height: 135, rx: 8, class: 'box bad' }, E.mon);
+        svg('text', { x: 514, y: 366, class: 'title' }, E.mon, 'ObjectMonitor');
+        [['_header', '原 Mark Word'], ['_owner', 'T2'], ['_cxq / _EntryList', 'T1（阻塞）'], ['_WaitSet', '调用 wait() 的线程']].forEach(([k, v], n) => {
+          svg('text', { x: 514, y: 390 + n * 22, class: 'mono small' }, E.mon, k);
+          svg('text', { x: 716, y: 390 + n * 22, 'text-anchor': 'end', class: 'small' }, E.mon, v);
+        });
+        E.anchors = { t1: { x: 128, y: 400 }, lr: { x: 375, y: 430 }, mon: { x: 615, y: 430 } };
+      } else {
+        svg('rect', { x: 270, y: 335, width: 210, height: 70, rx: 8, class: 'box dashed' }, g);
+        svg('text', { x: 284, y: 354, class: 'small muted' }, g, '线程栈帧');
+        E.lr = svg('g', { class: 'anim hide' }, g);
+        svg('rect', { x: 278, y: 360, width: 194, height: 40, rx: 6, class: 'box warn' }, E.lr);
+        svg('text', { x: 288, y: 376, class: 'small title' }, E.lr, 'Lock Record');
+        svg('text', { x: 288, y: 393, class: 'mono small' }, E.lr, 'hash 0x2a139a55, age 15');
+        E.mon = svg('g', { class: 'anim hide' }, g);
+        svg('rect', { x: 500, y: 335, width: 230, height: 70, rx: 8, class: 'box bad' }, E.mon);
+        svg('text', { x: 514, y: 356, class: 'title' }, E.mon, 'ObjectMonitor');
+        svg('text', { x: 514, y: 378, class: 'mono small' }, E.mon, '_header');
+        svg('text', { x: 716, y: 378, 'text-anchor': 'end', class: 'small' }, E.mon, '原 Mark Word（含 hash）');
+        svg('text', { x: 514, y: 396, class: 'mono small' }, E.mon, '_owner');
+        svg('text', { x: 716, y: 396, 'text-anchor': 'end', class: 'small' }, E.mon, 'T1');
+        // 堆分区
+        E.zones = {};
+        [['eden', 'Eden', 30, 150], ['s0', 'Survivor 0', 195, 150], ['s1', 'Survivor 1', 360, 150], ['old', '老年代', 525, 205]].forEach(([id, n, x, w]) => {
+          E.zones[id] = { r: svg('rect', { x, y: 420, width: w, height: 62, rx: 8, class: 'box soft anim' }, g), cx: x + w / 2 };
+          svg('text', { x: x + 10, y: 436, class: 'small muted' }, g, n);
+        });
+        E.obj = svg('g', { class: 'anim' }, g);
+        svg('rect', { x: -48, y: -12, width: 96, height: 24, rx: 5, class: 'box accent' }, E.obj);
+        E.objT = svg('text', { x: 0, y: 4, 'text-anchor': 'middle', class: 'mono small' }, E.obj, '');
+        E.anchors = { lr: { x: 375, y: 380 }, mon: { x: 615, y: 380 } };
+      }
+    },
+    render(st, step, i, ctx) {
+      const L = layout(st);
+      E.layoutHi.classList.toggle('hide', !step.hotLayout);
+      E.badge.textContent = '当前：' + L.badge;
+      E.badge.setAttribute('class', 'title ' + L.bc);
+      const mc = MCLS[st.mode];
+      // 高 56 位
+      let x = BX;
+      E.segs.forEach((s, k) => {
+        const h = L.high[k];
+        if (!h) {
+          s.rect.style.x = (BX + BW) + 'px'; s.rect.style.width = '0px';
+          s.rect.style.opacity = 0; s.tg.classList.add('hide');
+          return;
+        }
+        const w = h.b * PB;
+        s.rect.style.x = (x + 1) + 'px'; s.rect.style.width = (w - 2) + 'px'; s.rect.style.opacity = 1;
+        s.rect.setAttribute('class', 'box seg ' + (step.hotSeg === k ? 'accent' : mc));
+        s.tg.classList.remove('hide');
+        move(s.tg, x + w / 2, 0);
+        s.name.textContent = h.n;
+        s.val.textContent = h.v;
+        s.val.setAttribute('class', 'mono' + (step.hotSeg === k ? ' c-accent' : ''));
+        s.bits.textContent = h.l;
+        s.bits.setAttribute('x', w > 400 ? 50 : 0);   // 避开左侧竖向连线
+        E.anchors['seg' + k] = { x: x + w / 2, y: BY + BH / 2 };
+        x += w;
+      });
+      E.lowBox.setAttribute('class', 'box seg ' + mc);
+      // 低 8 位
+      const hb = step.hotBits || [];
+      E.cells.forEach((c, k) => {
+        const v = L.low[k];
+        c.t.textContent = v;
+        const lock = k >= 6;
+        c.rect.setAttribute('class', 'box anim ' + (hb.includes(k) ? 'accent' : lock ? mc : v === 'p' ? 'soft' : ''));
+        c.t.setAttribute('class', 'big' + (hb.includes(k) ? ' c-accent' : v === 'p' ? ' muted' : ''));
+      });
+      while (E.groups.firstChild) E.groups.removeChild(E.groups.firstChild);
+      for (const [n, from, len] of L.groups) {
+        const x1 = ZX + from * ZW + 4, x2 = ZX + (from + len) * ZW - 4, y = ZY + 48;
+        svg('path', { d: `M${x1},${y} v5 H${x2} v-5`, class: 'bracket' }, E.groups);
+        svg('text', { x: (x1 + x2) / 2, y: y + 20, 'text-anchor': 'middle', class: 'small ' + (n === 'age' && hb.includes(1) ? 'c-accent' : 'muted') }, E.groups, n === 'age' ? `age = ${st.age}` : n);
+      }
+      move(E.rowHi, 0, 220 + MODES.indexOf(st.mode) * 18);
+
+      // 下方区域
+      E.lr.classList.toggle('hide', !st.lr);
+      E.mon.classList.toggle('hide', !st.mon);
+      if (E.t1) { E.t1.textContent = st.t1; E.t2.textContent = st.t2; }
+      if (E.obj) {
+        const z = E.zones[st.zone];
+        for (const id in E.zones) E.zones[id].r.setAttribute('class', 'box anim ' + (id === st.zone ? (id === 'old' ? 'ok' : 'accent') : 'soft'));
+        move(E.obj, z.cx, 462);
+        E.objT.textContent = `obj  age=${st.age}`;
+      }
+      // Mark Word 指针 / 偏向线程
+      while (E.ptr.firstChild) E.ptr.removeChild(E.ptr.firstChild);
+      const top = Y_BOT(ctx.scenario);
+      if (st.ref === 't1') {
+        svg('path', { d: `M245,${BY + BH} V412 H238`, class: 'wire accent flow' }, E.ptr);
+        Player.arrow(E.ptr, 240, 412, 228, 412, 'accent');
+      } else if (st.ref === 'lr') {
+        const y = ctx.scenario === 0 ? 430 : 380;
+        svg('path', { d: `M245,${BY + BH} V${y} H${ctx.scenario === 0 ? 276 : 272}`, class: 'wire warn' }, E.ptr);
+        Player.arrow(E.ptr, ctx.scenario === 0 ? 268 : 264, y, ctx.scenario === 0 ? 281 : 277, y, 'warn');
+      } else if (st.ref === 'mon') {
+        svg('path', { d: `M245,${BY + BH} V${top - 10} H615 V${top - 4}`, class: 'wire bad' }, E.ptr);
+        Player.arrow(E.ptr, 615, top - 8, 615, top - 1, 'bad');
+      }
+      for (const [from, to, label, cls] of step.moves || []) fly(ctx.fx, E.anchors[from], E.anchors[to], label, cls);
+    },
+  });
+})();
+</script>
+</body>
+</html>
