@@ -1634,3 +1634,7 @@ Netty:
 		    ⑥ 有应用层心跳 + 空闲断开 + 客户端指数退避重连 + shutdownGracefully;
 		    ⑦ 设置了高低水位, 大批量发送前检查 isWritable;
 		    ⑧ Linux 生产环境使用 Epoll。
+
+	3. Netty 使用场景是什么?
+
+	4. 给出一个结合springboot 的 netty 案例!
